@@ -1,7 +1,5 @@
 import pandas as pd
 import numpy as np
-import tkinter as tk
-from tkinter import filedialog
 import re
 import datetime
 
@@ -1262,47 +1260,6 @@ def analyze_result(equity_df, trades_df, signal_events):
     print_group_stats("시간대별 성과", trades_df, "entry_hour")
     print_group_stats("청산사유별 성과", trades_df, "exit_reason")
 
-
-def select_csv_files():
-    root = tk.Tk()
-    root.withdraw()
-
-    return list(filedialog.askopenfilenames(
-        title="CSV 파일 선택",
-        filetypes=[("CSV files", "*.csv")]
-    ))
-
-
-if __name__ == "__main__":
-    files = select_csv_files()
-
-    if not files:
-        print("CSV 파일을 선택하지 않았습니다.")
-        exit()
-
-    for file_path in files:
-        print()
-        print("#" * 90)
-        print(f"파일 테스트 시작: {file_path}")
-        print("#" * 90)
-
-        raw_df = pd.read_csv(file_path)
-
-        print("CSV 로드 완료")
-        print("컬럼:", list(raw_df.columns))
-        print("데이터 개수:", len(raw_df))
-
-        df_1h, df_15m = prepare_data(raw_df)
-
-        print()
-        print("백테스트용 1시간봉 데이터:", len(df_1h))
-        print("백테스트용 15분봉 데이터:", len(df_15m))
-
-        signal_events = build_signal_events(df_1h, df_15m)
-
-        equity, trades = backtest(df_15m, signal_events)
-
-        analyze_result(equity, trades, signal_events)
 
 # ============================================================
 # Server Signal Wrapper
