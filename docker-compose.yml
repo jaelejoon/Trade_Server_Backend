@@ -1,11 +1,27 @@
 services:
-  trade-api:
+  api:
     build: .
     container_name: trade-api
     ports:
       - "8000:8000"
     env_file:
       - .env
-    volumes:
-      - ./data:/app/data
+    depends_on:
+      - db
     restart: unless-stopped
+
+  db:
+    image: postgres:16
+    container_name: trade-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: trade
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
