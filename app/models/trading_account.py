@@ -18,6 +18,8 @@ class TradingAccount(Base):
     max_risk_ratio = Column(Float, default=0.03)
     max_daily_loss_ratio = Column(Float, default=0.03)
 
+    dry_run = Column(Boolean, default=True, nullable=False)
+
     is_running = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
 

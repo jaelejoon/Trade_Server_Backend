@@ -10,15 +10,17 @@ from app.core.config import (
     DRY_RUN,
     ENVIRONMENT,
 )
-from app.core.middleware import SecurityHeadersMiddleware, SimpleRateLimitMiddleware
+from app.core.middleware import HttpsAuthMiddleware, RequestSizeLimitMiddleware, SecurityHeadersMiddleware, SimpleRateLimitMiddleware
 from app.db.base import Base
 from app.db.database import engine
+from app.db.migrations import ensure_runtime_schema
 from app.models import *  # noqa: F401,F403
-from app.routers import auth, binance, candles, health, strategy, trading
+from app.routers import admin, auth, backtests, binance, candles, health, strategy, strategy_management, trading
 from app.scheduler.bot_scheduler import shutdown_scheduler, start_scheduler
 
 
 Base.metadata.create_all(bind=engine)
+ensure_runtime_schema()
 
 
 app = FastAPI(
@@ -31,6 +33,8 @@ app = FastAPI(
 )
 
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(HttpsAuthMiddleware)
+app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(SimpleRateLimitMiddleware)
 
 app.add_middleware(
@@ -42,9 +46,12 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(binance.router)
 app.include_router(candles.router)
+app.include_router(strategy_management.router)
 app.include_router(strategy.router)
+app.include_router(backtests.router)
 app.include_router(trading.router)
 app.include_router(health.router)
 

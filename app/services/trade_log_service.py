@@ -2,6 +2,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.security import sanitize_sensitive_text
 from app.models.trade_log import TradeLog
 
 
@@ -51,14 +52,14 @@ def create_trade_log(
         signal_time=signal_time,
         stop_price=stop_price,
         take_profit_price=take_profit_price,
-        raw_response=raw_response,
+        raw_response=sanitize_sensitive_text(raw_response),
         entry_order_id=entry_order_id,
         stop_order_id=stop_order_id,
         take_profit_order_id=take_profit_order_id,
         client_order_id=client_order_id,
         emergency_close_executed=emergency_close_executed,
         emergency_close_order_id=emergency_close_order_id,
-        error_message=error_message,
+        error_message=sanitize_sensitive_text(error_message) if error_message else None,
     )
 
     db.add(log)

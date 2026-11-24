@@ -3,14 +3,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.config import BINANCE_TESTNET, DRY_RUN, ENABLE_LIVE_TRADING
+from app.core.config import BINANCE_TESTNET
 from app.core.jwt import get_current_user
-from app.core.security import encrypt_text
 from app.db.session import get_db
 from app.models.binance_api_key import BinanceApiKey
 from app.models.user import User
 from app.schemas import ApiKeyRegisterRequest, ApiKeyResponse, FuturesMarketOrderRequest, SetLeverageRequest
 from app.services.account_service import get_api_key_owned_by_user
+from app.services.api_key_security_service import encrypt_api_credentials
 from app.services.binance_service import (
     check_binance_permissions,
     futures_market_order_raw,
@@ -33,11 +33,16 @@ def register_binance_api_key(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    api_key_encrypted, secret_key_encrypted = encrypt_api_credentials(
+        body.api_key,
+        body.secret_key,
+    )
+
     if BINANCE_TESTNET:
         item = BinanceApiKey(
             user_id=current_user.id,
-            api_key_encrypted=encrypt_text(body.api_key),
-            secret_key_encrypted=encrypt_text(body.secret_key),
+            api_key_encrypted=api_key_encrypted,
+            secret_key_encrypted=secret_key_encrypted,
             label=body.label,
             is_active=True,
             enable_reading=True,
@@ -52,8 +57,8 @@ def register_binance_api_key(
 
         item = BinanceApiKey(
             user_id=current_user.id,
-            api_key_encrypted=encrypt_text(body.api_key),
-            secret_key_encrypted=encrypt_text(body.secret_key),
+            api_key_encrypted=api_key_encrypted,
+            secret_key_encrypted=secret_key_encrypted,
             label=body.label,
             is_active=True,
             enable_reading=bool(permissions.get("enableReading", False)),
@@ -169,7 +174,9 @@ def futures_market_order(
     api_key, secret_key = get_decrypted_api_keys(item)
     price = get_futures_price(body.symbol)
 
-    if DRY_RUN or not ENABLE_LIVE_TRADING:
+    order_dry_run = current_user.dry_run or not current_user.enable_live_trading
+
+    if order_dry_run:
         result = {
             "dry_run": True,
             "symbol": body.symbol.upper(),
@@ -198,8 +205,8 @@ def futures_market_order(
         qty=body.quantity,
         price=price,
         reduce_only=body.reduce_only,
-        dry_run=DRY_RUN,
-        status_value="DRY_RUN" if DRY_RUN else "SUBMITTED",
+        dry_run=order_dry_run,
+        status_value="DRY_RUN" if order_dry_run else "SUBMITTED",
         strategy=None,
         signal_time=None,
         stop_price=None,
@@ -207,4 +214,4 @@ def futures_market_order(
         raw_response=str(result),
     )
 
-    return {"status": "success", "dry_run": DRY_RUN, "result": result}
+    return {"status": "success", "dry_run": order_dry_run, "result": result}
