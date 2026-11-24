@@ -222,18 +222,18 @@ def place_market_with_bracket(db, account: TradingAccount, api_key: str, secret_
 
         return {'entry_response': entry_response, 'stop_response': stop_response, 'take_profit_response': take_profit_response, 'emergency_response': None, 'client_order_id': client_order_root, 'status': 'SUBMITTED', 'error_message': None, 'executed_quantity': executed_quantity, 'stop_price': stop_price, 'take_profit_price': take_profit_price}
 
-    except Exception as exc:
-        error_message = str(exc)
+    except Exception:
+        error_message = '진입 또는 보호 주문 처리 실패'
         if AUTO_CLOSE_ON_BRACKET_FAILURE and entry_response is not None:
             try:
                 executed_quantity = _executed_qty(entry_response, quantity)
                 emergency_response = emergency_close_position(api_key=api_key, secret_key=secret_key, symbol=symbol, entry_side=entry_side, quantity=executed_quantity)
-            except Exception as close_exc:
-                emergency_response = {'executed': False, 'error': str(close_exc)}
+            except Exception:
+                emergency_response = {'executed': False, 'error': '비상 종료 처리 실패'}
 
         account.is_running = False
         db.commit()
-        create_error_log(db=db, user_id=account.user_id, trading_account_id=account.id, source='place_market_with_bracket', message=error_message, raw_data=str({'entry': entry_response, 'stop': stop_response, 'take_profit': take_profit_response, 'emergency': emergency_response}))
+        create_error_log(db=db, user_id=account.user_id, trading_account_id=account.id, source='place_market_with_bracket', message=error_message)
 
         return {'entry_response': entry_response, 'stop_response': stop_response, 'take_profit_response': take_profit_response, 'emergency_response': emergency_response, 'client_order_id': client_order_root, 'status': 'BRACKET_FAILED_EMERGENCY_HANDLED' if emergency_response else 'BRACKET_FAILED', 'error_message': error_message}
 
@@ -334,14 +334,14 @@ def _save_latest_signal_state_safe(db, account: TradingAccount, signal_response=
             tick_response=tick_response,
             error_message=error_message,
         )
-    except Exception as exc:
+    except Exception:
         db.rollback()
         create_error_log(
             db=db,
             user_id=account.user_id,
             trading_account_id=account.id,
             source='save_latest_signal_state',
-            message=str(exc),
+            message='최근 신호 상태 저장 실패',
         )
 
 
@@ -358,8 +358,8 @@ def _execute_bot_tick(db, account: TradingAccount):
             account_dry_run=account.dry_run,
             live_trading_enabled=is_account_live_trading_enabled(db, account),
         )
-    except Exception as exc:
-        create_error_log(db=db, user_id=account.user_id, trading_account_id=account.id, source='execute_bot_tick.reconcile', message=str(exc))
+    except Exception:
+        create_error_log(db=db, user_id=account.user_id, trading_account_id=account.id, source='execute_bot_tick.reconcile', message='포지션 및 미체결 주문 조회 실패')
         raise
 
     active_position = reconcile_result['active_position']
@@ -540,7 +540,7 @@ def _execute_bot_tick(db, account: TradingAccount):
         emergency_close_executed=bool(emergency_response and emergency_response.get('executed')),
         emergency_close_order_id=_order_id(emergency_response.get('response')) if isinstance(emergency_response, dict) else None,
         error_message=placement.get('error_message'),
-        raw_response=str({'entry': entry_response, 'stop': stop_response, 'take_profit': take_profit_response, 'emergency': emergency_response, 'order_plan': order_plan, 'reconcile_result': reconcile_result}),
+        raw_response=None if placement.get('error_message') else str({'entry': entry_response, 'stop': stop_response, 'take_profit': take_profit_response, 'emergency': emergency_response, 'order_plan': order_plan, 'reconcile_result': reconcile_result}),
     )
 
     if placement.get('status') in ('SUBMITTED', 'DRY_RUN'):

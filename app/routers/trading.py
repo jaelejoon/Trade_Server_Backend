@@ -11,6 +11,7 @@ from app.models.error_log import ErrorLog
 from app.models.trade_log import TradeLog
 from app.models.trading_account import TradingAccount
 from app.models.user import User
+from app.routers.admin import require_admin
 from app.schemas import BotTickRequest, TradingAccountCreateRequest, TradingAccountResponse
 from app.scheduler.bot_scheduler import start_account_job, stop_account_job
 from app.services.account_service import get_active_trading_account_owned_by_user, get_api_key_owned_by_user, get_trading_account_owned_by_user
@@ -380,19 +381,11 @@ def error_logs(
     limit: int = 100,
     trading_account_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _admin: User = Depends(require_admin),
 ):
-    query = db.query(ErrorLog).filter(
-        (ErrorLog.user_id == current_user.id) | (ErrorLog.user_id == None)
-    )
-
+    query = db.query(ErrorLog)
     if trading_account_id is not None:
-        account = get_trading_account_owned_by_user(
-            db=db,
-            user_id=current_user.id,
-            trading_account_id=trading_account_id,
-        )
-        query = query.filter(ErrorLog.trading_account_id == account.id)
+        query = query.filter(ErrorLog.trading_account_id == trading_account_id)
 
     logs = (
         query
@@ -408,8 +401,8 @@ def error_logs(
             "trading_account_id": log.trading_account_id,
             "level": log.level,
             "source": log.source,
-            "message": log.message,
-            "raw_data": sanitize_sensitive_text(log.raw_data) if log.raw_data else None,
+            "message": "자동매매 처리 중 오류가 발생했습니다.",
+            "raw_data": None,
             "created_at": log.created_at,
         }
         for log in logs
@@ -507,7 +500,7 @@ def serialize_trade_log(log: TradeLog | None):
         "client_order_id": log.client_order_id,
         "emergency_close_executed": log.emergency_close_executed,
         "emergency_close_order_id": log.emergency_close_order_id,
-        "error_message": sanitize_sensitive_text(log.error_message) if log.error_message else None,
-        "raw_response": sanitize_sensitive_text(log.raw_response) if log.raw_response else None,
+        "error_message": "자동매매 처리 중 오류가 발생했습니다." if log.error_message else None,
+        "raw_response": sanitize_sensitive_text(log.raw_response) if log.raw_response and not log.error_message else None,
         "created_at": log.created_at,
     }

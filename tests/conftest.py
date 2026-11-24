@@ -1,4 +1,5 @@
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 dotenv.load_dotenv = lambda *args, **kwargs: False
 os.environ['ENVIRONMENT'] = 'dev'
 os.environ['DATABASE_URL'] = os.environ.get('TEST_DATABASE_URL', 'postgresql://localhost/trade_isolated_test')
+os.environ['JWT_SECRET_KEY'] = secrets.token_hex(32)
 os.environ['ENCRYPTION_KEY'] = Fernet.generate_key().decode()
 os.environ['DRY_RUN'] = 'true'
 os.environ['ENABLE_LIVE_TRADING'] = 'false'

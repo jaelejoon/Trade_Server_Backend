@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import time
 from decimal import Decimal, ROUND_DOWN
 from functools import lru_cache
@@ -18,8 +19,11 @@ from app.core.config import (
     BINANCE_SPOT_BASE_URL,
     SERVER_TIME_DRIFT_LIMIT_MS,
 )
-from app.core.security import decrypt_text, sanitize_sensitive_text
+from app.core.security import decrypt_text
 from app.models.binance_api_key import BinanceApiKey
+
+# urllib3 DEBUG 로그에는 서명된 요청 경로가 포함될 수 있다.
+logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
 
 RETRYABLE_BINANCE_CODES = {-1001, -1007, -1021}
 
@@ -38,8 +42,13 @@ def get_decrypted_api_keys(item: BinanceApiKey):
 def _parse_response(response: requests.Response):
     try:
         return response.json()
-    except Exception:
-        return {'raw': response.text}
+    except ValueError:
+        return None
+
+
+def _binance_error_code(data) -> Optional[int]:
+    code = data.get('code') if isinstance(data, dict) else None
+    return code if type(code) is int else None
 
 
 def _raise_binance_error(response: requests.Response, data):
@@ -48,7 +57,7 @@ def _raise_binance_error(response: requests.Response, data):
         detail={
             'message': 'Binance API 요청 실패',
             'binance_status': response.status_code,
-            'binance_response': data,
+            'binance_code': _binance_error_code(data),
         },
     )
 
@@ -75,8 +84,6 @@ def binance_signed_request(
     if params is None:
         params = {}
 
-    last_error = None
-
     for attempt in range(BINANCE_MAX_RETRIES):
         request_params = dict(params)
         request_params['timestamp'] = int(time.time() * 1000)
@@ -94,43 +101,46 @@ def binance_signed_request(
 
         try:
             if method == 'GET':
-                response = requests.get(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS)
+                response = requests.get(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
             elif method == 'POST':
-                response = requests.post(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS)
+                response = requests.post(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
             elif method == 'DELETE':
-                response = requests.delete(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS)
+                response = requests.delete(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
             else:
                 raise ValueError('지원하지 않는 HTTP method입니다.')
-        except requests.RequestException as exc:
-            last_error = exc
+        except requests.RequestException:
             if method != "GET":
-                raise OrderExecutionUnknown("Binance 쓰기 요청 결과를 확인할 수 없습니다.") from exc
+                raise OrderExecutionUnknown("Binance 쓰기 요청 결과를 확인할 수 없습니다.") from None
             if attempt < BINANCE_MAX_RETRIES - 1:
                 time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
                 continue
-            raise HTTPException(status_code=503, detail=f'Binance 네트워크 요청 실패: {sanitize_sensitive_text(exc)}')
+            raise HTTPException(status_code=503, detail='Binance 네트워크 요청 실패') from None
 
         data = _parse_response(response)
 
-        if response.status_code < 400:
+        if 200 <= response.status_code < 300 and data is not None:
             return data
 
-        if method != "GET" and (response.status_code >= 500 or (isinstance(data, dict) and data.get("code") in {-1006, -1007})):
+        if method != "GET" and (
+            response.status_code < 400
+            or response.status_code >= 500
+            or _binance_error_code(data) in {-1006, -1007}
+        ):
             raise OrderExecutionUnknown("Binance 쓰기 요청 결과가 불명확합니다.")
+        if 200 <= response.status_code < 300:
+            raise HTTPException(status_code=502, detail='Binance 응답 형식이 올바르지 않습니다.')
         if method == "GET" and _is_retryable_response(response.status_code, data) and attempt < BINANCE_MAX_RETRIES - 1:
             time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
             continue
 
         _raise_binance_error(response, data)
 
-    raise HTTPException(status_code=503, detail=f'Binance 요청 재시도 실패: {sanitize_sensitive_text(last_error)}')
+    raise HTTPException(status_code=503, detail='Binance 요청 재시도 실패') from None
 
 
 def binance_public_get(base_url: str, path: str, params: Optional[dict] = None):
     if params is None:
         params = {}
-
-    last_error = None
 
     for attempt in range(BINANCE_MAX_RETRIES):
         try:
@@ -139,31 +149,25 @@ def binance_public_get(base_url: str, path: str, params: Optional[dict] = None):
                 params=params,
                 timeout=BINANCE_REQUEST_TIMEOUT_SECONDS,
             )
-        except requests.RequestException as exc:
-            last_error = exc
+        except requests.RequestException:
             if attempt < BINANCE_MAX_RETRIES - 1:
                 time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
                 continue
-            raise HTTPException(status_code=503, detail=f'Binance Public API 네트워크 요청 실패: {sanitize_sensitive_text(exc)}')
+            raise HTTPException(status_code=503, detail='Binance Public API 네트워크 요청 실패') from None
 
         data = _parse_response(response)
-        if response.status_code < 400:
+        if 200 <= response.status_code < 300:
+            if data is None:
+                raise HTTPException(status_code=502, detail='Binance 응답 형식이 올바르지 않습니다.')
             return data
 
         if _is_retryable_response(response.status_code, data) and attempt < BINANCE_MAX_RETRIES - 1:
             time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
             continue
 
-        raise HTTPException(
-            status_code=400,
-            detail={
-                'message': 'Binance Public API 요청 실패',
-                'binance_status': response.status_code,
-                'binance_response': data,
-            },
-        )
+        _raise_binance_error(response, data)
 
-    raise HTTPException(status_code=503, detail=f'Binance Public API 재시도 실패: {sanitize_sensitive_text(last_error)}')
+    raise HTTPException(status_code=503, detail='Binance Public API 재시도 실패') from None
 
 
 def get_binance_server_time_ms() -> int:

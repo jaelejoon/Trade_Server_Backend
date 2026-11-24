@@ -8,7 +8,7 @@ load_dotenv(dotenv_path=".env", override=True)
 # 기본 서버 설정
 # =========================
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-jwt-secret")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "").strip()
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev").lower()
@@ -29,11 +29,8 @@ if not (
 ):
     raise RuntimeError("DATABASE_URL은 PostgreSQL 주소여야 합니다. 예: postgresql://postgres:postgres@localhost:5432/trade")
 
-if ENVIRONMENT == "prod" and JWT_SECRET_KEY in {
-    "dev-jwt-secret",
-    "change-this-jwt-secret",
-}:
-    raise RuntimeError("운영 환경에서는 기본 JWT_SECRET_KEY를 사용할 수 없습니다.")
+if len(JWT_SECRET_KEY.encode()) < 32:
+    raise RuntimeError("JWT_SECRET_KEY는 32바이트 이상이어야 합니다.")
 
 # =========================
 # CORS / Swagger
@@ -70,8 +67,8 @@ def build_allowed_origins() -> list[str]:
 
 ALLOWED_ORIGINS = build_allowed_origins()
 
-if ENVIRONMENT == "prod" and "*" in ALLOWED_ORIGINS:
-    raise RuntimeError("운영 환경에서는 ALLOWED_ORIGINS=* 를 사용할 수 없습니다.")
+if "*" in ALLOWED_ORIGINS:
+    raise RuntimeError("ALLOWED_ORIGINS에는 와일드카드를 사용할 수 없습니다.")
 
 # =========================
 # HTTPS / 프록시
