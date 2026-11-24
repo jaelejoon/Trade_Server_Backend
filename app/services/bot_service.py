@@ -16,6 +16,12 @@ from app.core.config import (
     STRATEGY_CALCULATION_MODE,
 )
 from app.core.security import now_utc, to_utc_isoformat
+from app.core.trading_limits import (
+    LEVERAGE_LIMIT_MESSAGE,
+    SYMBOL_LIMIT_MESSAGE,
+    is_allowed_leverage,
+    normalize_trading_symbol,
+)
 from app.models.trading_account import TradingAccount
 from app.models.user import User
 from app.services.account_service import get_api_key_owned_by_user, get_or_create_bot_state
@@ -191,6 +197,10 @@ def emergency_close_position(api_key: str, secret_key: str, symbol: str, entry_s
 
 
 def place_market_with_bracket(db, account: TradingAccount, api_key: str, secret_key: str, symbol: str, entry_side: str, exit_side: str, quantity: float, stop_price: float, take_profit_price: float, expected_entry_price: float, client_order_root: str | None = None):
+    symbol = normalize_trading_symbol(symbol)
+    if not is_allowed_leverage(account.leverage):
+        return {'status': 'ENTRY_BLOCKED', 'message': f'거래 계정 설정: {LEVERAGE_LIMIT_MESSAGE}'}
+
     client_order_root = client_order_root or f'v57_{account.id}_{uuid.uuid4().hex[:12]}'
     entry_response = None
     stop_response = None
@@ -210,11 +220,16 @@ def place_market_with_bracket(db, account: TradingAccount, api_key: str, secret_
             'error_message': None,
         }
 
-    if BINANCE_TESTNET:
+    try:
         configs = get_futures_symbol_config(api_key, secret_key, symbol)
-        if not any(config.get('symbol') == symbol and int(config['leverage']) == account.leverage for config in configs):
-            raise RuntimeError('기존 테스트넷 레버리지가 거래 계정과 일치하지 않습니다.')
-    else:
+        exchange_leverage = int(str(next(config['leverage'] for config in configs if config.get('symbol') == symbol)))
+    except (HTTPException, KeyError, StopIteration, TypeError, ValueError, AttributeError):
+        return {'status': 'ENTRY_BLOCKED', 'message': '거래소의 BTCUSDT 레버리지를 확인할 수 없습니다.'}
+    if not is_allowed_leverage(exchange_leverage):
+        return {'status': 'ENTRY_BLOCKED', 'message': f'거래소 BTCUSDT 설정: {LEVERAGE_LIMIT_MESSAGE}'}
+    if BINANCE_TESTNET and exchange_leverage != account.leverage:
+        return {'status': 'ENTRY_BLOCKED', 'message': '기존 테스트넷 레버리지가 거래 계정과 일치하지 않습니다.'}
+    if not BINANCE_TESTNET and exchange_leverage != account.leverage:
         futures_set_leverage_raw(api_key=api_key, secret_key=secret_key, symbol=symbol, leverage=account.leverage)
 
     try:
@@ -367,9 +382,12 @@ def _save_latest_signal_state_safe(db, account: TradingAccount, signal_response=
 
 
 def _execute_bot_tick(db, account: TradingAccount):
+    try:
+        symbol = normalize_trading_symbol(account.symbol)
+    except ValueError:
+        return {'status': 'blocked', 'message': SYMBOL_LIMIT_MESSAGE}
     api_key_item = get_api_key_owned_by_user(db=db, user_id=account.user_id, api_key_id=account.api_key_id)
     api_key, secret_key = get_decrypted_api_keys(api_key_item)
-    symbol = account.symbol.upper()
 
     try:
         reconcile_result = reconcile_position_and_open_orders(
@@ -408,6 +426,15 @@ def _execute_bot_tick(db, account: TradingAccount):
         )
     if runtime.get('pending_entry'):
         return {'status': 'blocked', 'message': 'ENTRY_RECONCILIATION_REQUIRED'}
+    if not management:
+        for label, leverage in (
+            ('거래 계정 설정', account.leverage),
+            ('V57 전략 설정', strategy_engine.LIQUIDATION_LEVERAGE),
+        ):
+            if not is_allowed_leverage(leverage):
+                result = {'status': 'blocked', 'message': f'{label}: {LEVERAGE_LIMIT_MESSAGE}'}
+                _save_latest_signal_state_safe(db, account, tick_response=result)
+                return result
     if runtime.get('cooldown_until') and pd.Timestamp(now_utc()).tz_localize(None) < pd.Timestamp(runtime['cooldown_until']):
         return {'status': 'skipped', 'message': 'COOLDOWN'}
     equity = get_usdt_equity(api_key, secret_key) if live else runtime.get('paper_balance')
@@ -516,6 +543,14 @@ def _execute_bot_tick(db, account: TradingAccount):
     db.commit()
 
     placement = place_market_with_bracket(db=db, account=account, api_key=api_key, secret_key=secret_key, symbol=symbol, entry_side=entry_side, exit_side=exit_side, quantity=quantity, stop_price=stop_price, take_profit_price=take_profit_price, expected_entry_price=order_plan['expected_entry_price'], client_order_root=client_order_root)
+
+    if placement['status'] == 'ENTRY_BLOCKED':
+        runtime.pop('pending_entry')
+        state.runtime_state = deepcopy(runtime)
+        db.commit()
+        result = {'status': 'blocked', 'message': placement['message']}
+        _save_latest_signal_state_safe(db, account, tick_response=result)
+        return result
 
     if placement.get('status') in ('SUBMITTED', 'DRY_RUN'):
         config = {key: deepcopy(getattr(strategy_engine, key)) for key in strategy_engine.DEFAULT_V57_CONFIG}

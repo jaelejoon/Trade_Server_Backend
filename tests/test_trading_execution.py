@@ -168,7 +168,7 @@ def test_timed_out_post_never_retried(monkeypatch):
     send = Mock(side_effect=requests.Timeout())
     monkeypatch.setattr(exchange.requests, 'post', send)
     with pytest.raises(exchange.OrderExecutionUnknown):
-        exchange.binance_signed_request('POST', exchange.BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', 'key', 'secret')
+        exchange.binance_signed_request('POST', exchange.BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', 'key', 'secret', {'symbol': 'BTCUSDT'})
     assert send.call_count == 1
 
 

@@ -23,6 +23,7 @@ from app.core.config import (
     ENABLE_LIVE_TRADING,
 )
 from app.core.security import decrypt_text
+from app.core.trading_limits import LEVERAGE_LIMIT_MESSAGE, is_allowed_leverage, normalize_trading_symbol
 from app.models.binance_api_key import BinanceApiKey
 
 # urllib3 DEBUG 로그에는 서명된 요청 경로가 포함될 수 있다.
@@ -91,6 +92,18 @@ def binance_signed_request(
         raise HTTPException(status_code=403, detail='현재 모드에서는 Binance 쓰기 요청이 허용되지 않습니다.')
     if params is None:
         params = {}
+    if method == 'POST' and path not in {'/fapi/v1/order', '/fapi/v1/algoOrder', '/fapi/v1/leverage'}:
+        raise HTTPException(status_code=403, detail='지원하지 않는 Binance 쓰기 경로입니다.')
+    if method == 'POST' or (method == 'DELETE' and path != '/fapi/v1/algoOrder'):
+        try:
+            symbol = normalize_trading_symbol(params.get('symbol'))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        params = {**params, 'symbol': symbol}
+    if method == 'POST' and path == '/fapi/v1/leverage':
+        leverage = params.get('leverage')
+        if type(leverage) is not int or not is_allowed_leverage(leverage):
+            raise HTTPException(status_code=400, detail=LEVERAGE_LIMIT_MESSAGE)
 
     for attempt in range(BINANCE_MAX_RETRIES):
         request_params = dict(params)
@@ -363,14 +376,16 @@ def futures_market_order_raw(api_key: str, secret_key: str, symbol: str, side: L
 
 
 def futures_stop_market_order_raw(api_key: str, secret_key: str, symbol: str, side: Literal['BUY', 'SELL'], stop_price: float, new_client_order_id: Optional[str] = None):
-    params = {'symbol': symbol.upper(), 'side': side, 'type': 'STOP_MARKET', 'algoType': 'CONDITIONAL', 'triggerPrice': normalize_price(symbol, stop_price), 'closePosition': 'true', 'workingType': 'CONTRACT_PRICE'}
+    symbol = normalize_trading_symbol(symbol)
+    params = {'symbol': symbol, 'side': side, 'type': 'STOP_MARKET', 'algoType': 'CONDITIONAL', 'triggerPrice': normalize_price(symbol, stop_price), 'closePosition': 'true', 'workingType': 'CONTRACT_PRICE'}
     if new_client_order_id:
         params['clientAlgoId'] = new_client_order_id
     return binance_signed_request('POST', BINANCE_FUTURES_BASE_URL, '/fapi/v1/algoOrder', api_key, secret_key, params=params)
 
 
 def futures_take_profit_market_order_raw(api_key: str, secret_key: str, symbol: str, side: Literal['BUY', 'SELL'], stop_price: float, new_client_order_id: Optional[str] = None):
-    params = {'symbol': symbol.upper(), 'side': side, 'type': 'TAKE_PROFIT_MARKET', 'algoType': 'CONDITIONAL', 'triggerPrice': normalize_price(symbol, stop_price), 'closePosition': 'true', 'workingType': 'CONTRACT_PRICE'}
+    symbol = normalize_trading_symbol(symbol)
+    params = {'symbol': symbol, 'side': side, 'type': 'TAKE_PROFIT_MARKET', 'algoType': 'CONDITIONAL', 'triggerPrice': normalize_price(symbol, stop_price), 'closePosition': 'true', 'workingType': 'CONTRACT_PRICE'}
     if new_client_order_id:
         params['clientAlgoId'] = new_client_order_id
     return binance_signed_request('POST', BINANCE_FUTURES_BASE_URL, '/fapi/v1/algoOrder', api_key, secret_key, params=params)

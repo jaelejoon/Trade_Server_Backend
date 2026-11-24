@@ -4,6 +4,8 @@ import re
 import datetime
 from threading import RLock
 
+from app.core.trading_limits import MAX_LEVERAGE
+
 # ============================================================
 # V57_LONG_SAFE_PUSH
 #
@@ -27,7 +29,7 @@ FEE_RATE = 0.0005
 SLIPPAGE = 0.0004
 
 ENABLE_LIQUIDATION_CHECK = True
-LIQUIDATION_LEVERAGE = 2.0
+LIQUIDATION_LEVERAGE = float(MAX_LEVERAGE)
 LIQUIDATION_BUFFER_PCT = 0.05
 
 ATR_PERIOD = 14

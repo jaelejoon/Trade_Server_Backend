@@ -1,7 +1,12 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, EmailStr, Field
+
+from app.core.trading_limits import MAX_LEVERAGE, TRADING_SYMBOL, normalize_trading_symbol
+
+
+TradingSymbol = Annotated[str, AfterValidator(normalize_trading_symbol)]
 
 
 class RegisterRequest(BaseModel):
@@ -55,8 +60,8 @@ class ApiKeyResponse(BaseModel):
 
 class TradingAccountCreateRequest(BaseModel):
     api_key_id: int
-    symbol: str = "BTCUSDT"
-    leverage: int = Field(default=2, ge=1, le=10)
+    symbol: TradingSymbol = TRADING_SYMBOL
+    leverage: int = Field(default=MAX_LEVERAGE, ge=1, le=MAX_LEVERAGE)
     max_risk_ratio: float = Field(default=0.03, gt=0, le=0.2)
     max_daily_loss_ratio: float = Field(default=0.03, gt=0, le=0.2)
 
@@ -78,7 +83,7 @@ class TradingAccountResponse(BaseModel):
 
 class FuturesMarketOrderRequest(BaseModel):
     api_key_id: int
-    symbol: str = "BTCUSDT"
+    symbol: TradingSymbol = TRADING_SYMBOL
     side: Literal["BUY", "SELL"]
     quantity: float = Field(gt=0)
     reduce_only: bool = False
@@ -86,8 +91,8 @@ class FuturesMarketOrderRequest(BaseModel):
 
 class SetLeverageRequest(BaseModel):
     api_key_id: int
-    symbol: str = "BTCUSDT"
-    leverage: int = Field(ge=1, le=10)
+    symbol: TradingSymbol = TRADING_SYMBOL
+    leverage: int = Field(ge=1, le=MAX_LEVERAGE)
 
 
 class BotTickRequest(BaseModel):

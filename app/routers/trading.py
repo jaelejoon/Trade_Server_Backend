@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import CANDLE_WARMUP_DAYS
 from app.core.jwt import get_current_user
+from app.core.trading_limits import normalize_trading_symbol
 from app.db.session import get_db
 from app.models.error_log import ErrorLog
 from app.models.trade_log import TradeLog
@@ -231,10 +232,14 @@ def start_trading_account(
 ):
     account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
+    try:
+        symbol = normalize_trading_symbol(account.symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     sync_result = BinanceCandleSyncService.warmup_historical_1m_candles(
         db=db,
         user_id=current_user.id,
-        symbol=account.symbol,
+        symbol=symbol,
         days=CANDLE_WARMUP_DAYS,
     )
 

@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.trading_limits import LEVERAGE_LIMIT_MESSAGE, MAX_LEVERAGE, is_allowed_leverage
 from app.models.trading_strategy import StrategySettingHistory, TradingStrategy, UserStrategySetting
 from app.models.trading_account import TradingAccount
 from app.strategy.strategy_v57 import DEFAULT_V57_CONFIG
@@ -245,10 +246,14 @@ def get_strategy_or_404(db: Session, strategy_id: int) -> TradingStrategy:
 
 def validate_strategy_config(strategy: TradingStrategy, config: dict[str, Any]) -> dict[str, Any]:
     if config is None:
-        return {}
+        config = {}
 
     if not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="custom_config는 JSON object여야 합니다.")
+
+    default_leverage = (strategy.default_config or {}).get("LIQUIDATION_LEVERAGE", MAX_LEVERAGE)
+    if not is_allowed_leverage(config.get("LIQUIDATION_LEVERAGE", default_leverage)):
+        raise HTTPException(status_code=400, detail=f"LIQUIDATION_LEVERAGE: {LEVERAGE_LIMIT_MESSAGE}")
 
     editable_fields = set(strategy.editable_fields or [])
     unknown_fields = sorted(set(config.keys()) - editable_fields)
@@ -435,6 +440,8 @@ def create_admin_strategy(
 ) -> TradingStrategy:
     base_config = deepcopy(DEFAULT_V57_CONFIG)
     base_config.update(default_config or {})
+    if not is_allowed_leverage(base_config["LIQUIDATION_LEVERAGE"]):
+        raise HTTPException(status_code=400, detail=f"LIQUIDATION_LEVERAGE: {LEVERAGE_LIMIT_MESSAGE}")
 
     duplicated = (
         db.query(TradingStrategy)
