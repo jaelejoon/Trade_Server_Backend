@@ -125,10 +125,12 @@ MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", "1048576"))
 
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 
-BINANCE_FUTURES_BASE_URL = os.getenv(
-    "BINANCE_FUTURES_BASE_URL",
-    "https://demo-fapi.binance.com" if BINANCE_TESTNET else "https://fapi.binance.com",
-)
+BINANCE_TESTNET_FUTURES_URL = "https://demo-fapi.binance.com"
+BINANCE_PRODUCTION_FUTURES_URL = "https://fapi.binance.com"
+_expected_futures_url = BINANCE_TESTNET_FUTURES_URL if BINANCE_TESTNET else BINANCE_PRODUCTION_FUTURES_URL
+BINANCE_FUTURES_BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", _expected_futures_url).rstrip("/")
+if BINANCE_FUTURES_BASE_URL != _expected_futures_url:
+    raise RuntimeError("Binance 선물 URL이 선택한 거래 환경과 일치하지 않습니다.")
 
 BINANCE_SPOT_BASE_URL = os.getenv("BINANCE_SPOT_BASE_URL", "https://api.binance.com")
 

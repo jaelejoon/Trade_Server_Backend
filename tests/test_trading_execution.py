@@ -163,10 +163,12 @@ def test_algo_order_payload(monkeypatch):
 
 
 def test_timed_out_post_never_retried(monkeypatch):
+    monkeypatch.setattr(exchange, 'DRY_RUN', False)
+    monkeypatch.setattr(exchange, 'ENABLE_LIVE_TRADING', True)
     send = Mock(side_effect=requests.Timeout())
     monkeypatch.setattr(exchange.requests, 'post', send)
     with pytest.raises(exchange.OrderExecutionUnknown):
-        exchange.binance_signed_request('POST', 'https://invalid.test', '/fapi/v1/order', 'key', 'secret')
+        exchange.binance_signed_request('POST', exchange.BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', 'key', 'secret')
     assert send.call_count == 1
 
 
@@ -195,7 +197,10 @@ def test_global_dry_run_overrides_user_permission():
 
 def test_bracket_failure_closes_before_cancelling(monkeypatch):
     monkeypatch.setattr(bot, 'is_account_live_trading_enabled', lambda *_: True)
-    monkeypatch.setattr(bot, 'futures_set_leverage_raw', Mock())
+    leverage_write = Mock()
+    monkeypatch.setattr(bot, 'futures_set_leverage_raw', leverage_write)
+    monkeypatch.setattr(bot, 'get_futures_symbol_config', lambda *_: [{'symbol': 'BTCUSDT', 'leverage': 2}])
+    monkeypatch.setattr(bot, 'get_futures_open_algo_orders_raw', lambda *_: [])
     monkeypatch.setattr(bot, 'futures_market_order_raw', Mock(return_value={'executedQty': '1', 'avgPrice': '100', 'status': 'FILLED'}))
     monkeypatch.setattr(bot, 'normalize_price', lambda _, p: p)
     monkeypatch.setattr(bot, 'futures_stop_market_order_raw', Mock(side_effect=RuntimeError('bracket failed')))
@@ -205,6 +210,7 @@ def test_bracket_failure_closes_before_cancelling(monkeypatch):
     account = SimpleNamespace(id=1, user_id=1, leverage=2, is_running=True)
     result = bot.place_market_with_bracket(Mock(), account, 'k', 's', 'BTCUSDT', 'BUY', 'SELL', 1, 99., 108.5, 100.)
     assert close.call_count == 1
+    leverage_write.assert_not_called()
     assert not account.is_running
     assert result['status'] == 'BRACKET_FAILED_EMERGENCY_HANDLED'
 
@@ -298,3 +304,96 @@ def test_cooldown_blocks_the_bar_after_exit():
     equity, trades = strategy.backtest(bars, pd.DataFrame([signal(), signal('2026-11-24 10:15')]))
     assert len(trades) == 1
     assert equity.iloc[-1]['open_positions'] == 0
+
+
+@pytest.mark.parametrize('account_dry_run,user_dry_run,expected', [
+    (True, False, False), (False, True, False), (False, False, True),
+])
+def test_account_and_user_dry_run_override_permission(monkeypatch, account_dry_run, user_dry_run, expected):
+    monkeypatch.setattr(bot, 'DRY_RUN', False)
+    monkeypatch.setattr(bot, 'ENABLE_LIVE_TRADING', True)
+    db = Mock()
+    db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+        is_active=True, dry_run=user_dry_run, enable_live_trading=True,
+    )
+    account = SimpleNamespace(dry_run=account_dry_run, user_id=1)
+    assert bot.is_account_live_trading_enabled(db, account) is expected
+
+
+def test_manual_market_order_is_simulated_for_live_user(monkeypatch):
+    from app.routers import binance
+
+    monkeypatch.setattr(binance, 'get_api_key_owned_by_user', Mock())
+    monkeypatch.setattr(binance, 'get_futures_price', lambda _: 100.)
+    decrypt = Mock()
+    log = Mock()
+    monkeypatch.setattr(binance, 'get_decrypted_api_keys', decrypt)
+    monkeypatch.setattr(binance, 'create_trade_log', log)
+    body = SimpleNamespace(api_key_id=1, symbol='BTCUSDT', side='BUY', quantity=1., reduce_only=False)
+    user = SimpleNamespace(id=1, dry_run=False, enable_live_trading=True)
+    assert binance.futures_market_order(body, Mock(), user)['dry_run']
+    assert log.call_args.kwargs['status_value'] == 'DRY_RUN'
+    decrypt.assert_not_called()
+
+
+def test_dry_run_blocks_signed_writes(monkeypatch):
+    post = Mock()
+    monkeypatch.setattr(exchange.requests, 'post', post)
+    with pytest.raises(exchange.HTTPException) as error:
+        exchange.binance_signed_request('POST', exchange.BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', 'k', 's')
+    assert error.value.status_code == 403
+    post.assert_not_called()
+
+
+def test_failed_take_profit_closes_then_cancels_only_own_stop(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bot, 'is_account_live_trading_enabled', lambda *_: True)
+    monkeypatch.setattr(bot, 'get_futures_symbol_config', lambda *_: [{'symbol': 'BTCUSDT', 'leverage': 2}])
+    monkeypatch.setattr(bot, 'futures_market_order_raw', lambda **_: {'executedQty': '1', 'avgPrice': '100'})
+    monkeypatch.setattr(bot, 'normalize_price', lambda _, p: p)
+    monkeypatch.setattr(bot, 'futures_stop_market_order_raw', lambda **_: {'algoId': 1})
+    monkeypatch.setattr(bot, 'futures_take_profit_market_order_raw', Mock(side_effect=exchange.OrderExecutionUnknown()))
+    monkeypatch.setattr(bot, 'emergency_close_position', lambda **_: calls.append('close') or {'executed': True})
+    monkeypatch.setattr(bot, 'get_futures_open_algo_orders_raw', lambda *_: [
+        {'algoId': 1, 'clientAlgoId': 'root_stop'}, {'algoId': 2, 'clientAlgoId': 'other_stop'},
+    ])
+    monkeypatch.setattr(bot, 'cancel_futures_algo_order_raw', lambda *args: calls.append(args[-1]))
+    monkeypatch.setattr(bot, 'create_error_log', Mock())
+    account = SimpleNamespace(id=1, user_id=1, leverage=2, is_running=True)
+    result = bot.place_market_with_bracket(Mock(), account, 'k', 's', 'BTCUSDT', 'BUY', 'SELL', 1, 99., 108.5, 100., 'root')
+    assert calls == ['close', 1]
+    assert not account.is_running
+    assert result['status'] == 'BRACKET_FAILED_EMERGENCY_HANDLED'
+
+
+def test_restarted_bot_refuses_to_adopt_untracked_position():
+    state = SimpleNamespace(runtime_state={})
+    _, result = management.manage_position(None, SimpleNamespace(), state, 'k', 's', {'positionAmt': '1'}, True)
+    assert result['message'] == 'UNMANAGED_POSITION'
+
+
+def test_concurrent_tick_skips_before_order_path(monkeypatch):
+    from app.db.database import engine
+
+    connection = Mock()
+    connection.execute.return_value.scalar.return_value = False
+    context = Mock()
+    context.__enter__ = Mock(return_value=connection)
+    context.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(engine, 'connect', lambda: context)
+    tick = Mock()
+    monkeypatch.setattr(bot, '_execute_bot_tick', tick)
+    result = bot.execute_bot_tick(Mock(), SimpleNamespace(api_key_id=1))
+    assert result['message'] == 'ACCOUNT_TICK_IN_PROGRESS'
+    tick.assert_not_called()
+
+
+def test_wrong_futures_host_blocks_signed_write(monkeypatch):
+    monkeypatch.setattr(exchange, 'DRY_RUN', False)
+    monkeypatch.setattr(exchange, 'ENABLE_LIVE_TRADING', True)
+    post = Mock()
+    monkeypatch.setattr(exchange.requests, 'post', post)
+    with pytest.raises(exchange.HTTPException) as error:
+        exchange.binance_signed_request('POST', 'https://different.invalid', '/fapi/v1/order', 'k', 's')
+    assert error.value.status_code == 403
+    post.assert_not_called()

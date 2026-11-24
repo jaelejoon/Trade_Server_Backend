@@ -18,6 +18,9 @@ from app.core.config import (
     BINANCE_RETRY_BASE_SLEEP_SECONDS,
     BINANCE_SPOT_BASE_URL,
     SERVER_TIME_DRIFT_LIMIT_MS,
+    BINANCE_TESTNET,
+    DRY_RUN,
+    ENABLE_LIVE_TRADING,
 )
 from app.core.security import decrypt_text
 from app.models.binance_api_key import BinanceApiKey
@@ -81,6 +84,11 @@ def binance_signed_request(
     secret_key: str,
     params: Optional[dict] = None,
 ):
+    if method in {'POST', 'DELETE'} and (
+        DRY_RUN or not ENABLE_LIVE_TRADING or base_url != BINANCE_FUTURES_BASE_URL
+        or (BINANCE_TESTNET and path == '/fapi/v1/leverage')
+    ):
+        raise HTTPException(status_code=403, detail='현재 모드에서는 Binance 쓰기 요청이 허용되지 않습니다.')
     if params is None:
         params = {}
 
@@ -122,7 +130,8 @@ def binance_signed_request(
             return data
 
         if method != "GET" and (
-            response.status_code < 400
+            response.status_code == 408
+            or response.status_code < 400
             or response.status_code >= 500
             or _binance_error_code(data) in {-1006, -1007}
         ):
@@ -323,6 +332,10 @@ def calc_open_position_value_from_binance_position(position: Optional[dict]) -> 
     position_amt = abs(float(position.get('positionAmt', '0')))
     mark_price = float(position.get('markPrice', '0'))
     return position_amt * mark_price
+
+
+def get_futures_symbol_config(api_key: str, secret_key: str, symbol: str):
+    return binance_signed_request('GET', BINANCE_FUTURES_BASE_URL, '/fapi/v1/symbolConfig', api_key, secret_key, params={'symbol': symbol.upper()})
 
 
 def futures_set_leverage_raw(api_key: str, secret_key: str, symbol: str, leverage: int):

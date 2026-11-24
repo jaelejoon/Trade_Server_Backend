@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app.core.config import (
     AUTO_CLOSE_ON_BRACKET_FAILURE,
+    BINANCE_TESTNET,
     DRY_RUN,
     ENABLE_LIVE_TRADING,
     STRATEGY_CALCULATION_GRACE_SECONDS,
@@ -20,7 +21,10 @@ from app.models.user import User
 from app.services.account_service import get_api_key_owned_by_user, get_or_create_bot_state
 from app.services.binance_service import (
     calc_open_position_value_from_binance_position,
+    cancel_futures_algo_order_raw,
     get_futures_open_algo_orders_raw,
+    get_futures_open_orders_raw,
+    get_futures_symbol_config,
     get_usdt_equity,
     futures_market_order_raw,
     futures_set_leverage_raw,
@@ -57,7 +61,7 @@ def is_account_live_trading_enabled(db, account: TradingAccount) -> bool:
     if not user or not user.is_active:
         return False
 
-    return bool(user.enable_live_trading)
+    return not user.dry_run and bool(user.enable_live_trading)
 
 def _order_id(response):
     if isinstance(response, dict):
@@ -96,6 +100,7 @@ def reconcile_position_and_open_orders(api_key: str, secret_key: str, symbol: st
         return {'active_position': active_position, 'open_orders': [], 'cleanup_executed': False, 'cleanup_result': None, 'dry_run': True}
 
     open_orders = get_futures_open_algo_orders_raw(api_key, secret_key, symbol)
+    open_orders += get_futures_open_orders_raw(api_key, secret_key, symbol)
     return {'active_position': active_position, 'open_orders': open_orders, 'cleanup_executed': False, 'cleanup_result': None, 'dry_run': False}
 
 
@@ -205,7 +210,12 @@ def place_market_with_bracket(db, account: TradingAccount, api_key: str, secret_
             'error_message': None,
         }
 
-    futures_set_leverage_raw(api_key=api_key, secret_key=secret_key, symbol=symbol, leverage=account.leverage)
+    if BINANCE_TESTNET:
+        configs = get_futures_symbol_config(api_key, secret_key, symbol)
+        if not any(config.get('symbol') == symbol and int(config['leverage']) == account.leverage for config in configs):
+            raise RuntimeError('기존 테스트넷 레버리지가 거래 계정과 일치하지 않습니다.')
+    else:
+        futures_set_leverage_raw(api_key=api_key, secret_key=secret_key, symbol=symbol, leverage=account.leverage)
 
     try:
         entry_response = futures_market_order_raw(api_key=api_key, secret_key=secret_key, symbol=symbol, side=entry_side, quantity=quantity, reduce_only=False, new_client_order_id=f'{client_order_root}_entry')
@@ -215,9 +225,11 @@ def place_market_with_bracket(db, account: TradingAccount, api_key: str, secret_
         take_profit_price = normalize_price(symbol, take_profit_price + shift)
 
         stop_response = futures_stop_market_order_raw(api_key=api_key, secret_key=secret_key, symbol=symbol, side=exit_side, stop_price=stop_price, new_client_order_id=f'{client_order_root}_stop')
+        if not stop_response.get('algoId'):
+            raise RuntimeError('손절 주문 접수 번호를 확인할 수 없습니다.')
         take_profit_response = futures_take_profit_market_order_raw(api_key=api_key, secret_key=secret_key, symbol=symbol, side=exit_side, stop_price=take_profit_price, new_client_order_id=f'{client_order_root}_tp')
 
-        if not stop_response.get('algoId') or not take_profit_response.get('algoId'):
+        if not take_profit_response.get('algoId'):
             raise RuntimeError('보호 주문 접수 번호를 확인할 수 없습니다.')
 
         return {'entry_response': entry_response, 'stop_response': stop_response, 'take_profit_response': take_profit_response, 'emergency_response': None, 'client_order_id': client_order_root, 'status': 'SUBMITTED', 'error_message': None, 'executed_quantity': executed_quantity, 'stop_price': stop_price, 'take_profit_price': take_profit_price}
@@ -231,11 +243,20 @@ def place_market_with_bracket(db, account: TradingAccount, api_key: str, secret_
             except Exception:
                 emergency_response = {'executed': False, 'error': '비상 종료 처리 실패'}
 
+        if emergency_response and emergency_response.get('executed'):
+            try:
+                for order in get_futures_open_algo_orders_raw(api_key, secret_key, symbol):
+                    if order.get('clientAlgoId') in {f'{client_order_root}_stop', f'{client_order_root}_tp'}:
+                        cancel_futures_algo_order_raw(api_key, secret_key, order['algoId'])
+            except Exception:
+                error_message += ' / 남은 보호 주문 확인 필요'
+                emergency_response['cleanup_failed'] = True
+
         account.is_running = False
         db.commit()
         create_error_log(db=db, user_id=account.user_id, trading_account_id=account.id, source='place_market_with_bracket', message=error_message)
 
-        return {'entry_response': entry_response, 'stop_response': stop_response, 'take_profit_response': take_profit_response, 'emergency_response': emergency_response, 'client_order_id': client_order_root, 'status': 'BRACKET_FAILED_EMERGENCY_HANDLED' if emergency_response else 'BRACKET_FAILED', 'error_message': error_message}
+        return {'entry_response': entry_response, 'stop_response': stop_response, 'take_profit_response': take_profit_response, 'emergency_response': emergency_response, 'client_order_id': client_order_root, 'status': 'BRACKET_FAILED_EMERGENCY_HANDLED' if emergency_response and emergency_response.get('executed') and not emergency_response.get('cleanup_failed') else 'BRACKET_FAILED', 'error_message': error_message}
 
 
 
@@ -404,6 +425,8 @@ def _execute_bot_tick(db, account: TradingAccount):
         result = {'status': management['status'], 'message': management.get('message', 'POSITION_ALREADY_EXISTS'), 'management': management, 'dry_run': not live}
         _save_latest_signal_state_safe(db, account, tick_response=result)
         return result
+    if live and reconcile_result['open_orders']:
+        return {'status': 'blocked', 'message': 'UNMANAGED_OPEN_ORDERS'}
     if equity <= 0:
         return {'status': 'skipped', 'message': 'NO_AVAILABLE_EQUITY'}
     if blocked:

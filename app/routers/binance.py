@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.config import BINANCE_TESTNET
+from app.core.config import BINANCE_TESTNET, DRY_RUN, ENABLE_LIVE_TRADING
 from app.core.jwt import get_current_user
 from app.db.session import get_db
 from app.models.binance_api_key import BinanceApiKey
@@ -13,7 +13,6 @@ from app.services.account_service import get_api_key_owned_by_user
 from app.services.api_key_security_service import encrypt_api_credentials
 from app.services.binance_service import (
     check_binance_permissions,
-    futures_market_order_raw,
     futures_set_leverage_raw,
     get_decrypted_api_keys,
     get_futures_balance_raw,
@@ -158,7 +157,19 @@ def futures_set_leverage(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if BINANCE_TESTNET or DRY_RUN or not ENABLE_LIVE_TRADING or current_user.dry_run or not current_user.enable_live_trading:
+        raise HTTPException(status_code=403, detail="현재 모드에서는 레버리지를 변경할 수 없습니다.")
+
     item = get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
+    accounts = db.query(TradingAccount).filter(
+        TradingAccount.user_id == current_user.id,
+        TradingAccount.api_key_id == body.api_key_id,
+        TradingAccount.symbol == body.symbol.upper(),
+        TradingAccount.is_active.is_(True),
+    ).all()
+    if not accounts or any(account.dry_run or account.is_running for account in accounts):
+        raise HTTPException(status_code=403, detail="해당 계정의 레버리지를 변경할 수 없습니다.")
+
     api_key, secret_key = get_decrypted_api_keys(item)
     result = futures_set_leverage_raw(api_key, secret_key, body.symbol, body.leverage)
     return {"status": "success", "result": result}
@@ -170,29 +181,16 @@ def futures_market_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    item = get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
+    # 이 요청에는 거래 계정 ID가 없어 계정별 주문 허용 여부를 확인할 수 없다.
+    get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
     price = get_futures_price(body.symbol)
-
-    order_dry_run = current_user.dry_run or not current_user.enable_live_trading
-
-    if order_dry_run:
-        result = {
-            "dry_run": True,
-            "symbol": body.symbol.upper(),
-            "side": body.side,
-            "quantity": body.quantity,
-            "reduce_only": body.reduce_only,
-        }
-    else:
-        result = futures_market_order_raw(
-            api_key=api_key,
-            secret_key=secret_key,
-            symbol=body.symbol,
-            side=body.side,
-            quantity=body.quantity,
-            reduce_only=body.reduce_only,
-        )
+    result = {
+        "dry_run": True,
+        "symbol": body.symbol.upper(),
+        "side": body.side,
+        "quantity": body.quantity,
+        "reduce_only": body.reduce_only,
+    }
 
     create_trade_log(
         db=db,
@@ -205,8 +203,8 @@ def futures_market_order(
         qty=body.quantity,
         price=price,
         reduce_only=body.reduce_only,
-        dry_run=order_dry_run,
-        status_value="DRY_RUN" if order_dry_run else "SUBMITTED",
+        dry_run=True,
+        status_value="DRY_RUN",
         strategy=None,
         signal_time=None,
         stop_price=None,
@@ -214,4 +212,4 @@ def futures_market_order(
         raw_response=str(result),
     )
 
-    return {"status": "success", "dry_run": order_dry_run, "result": result}
+    return {"status": "success", "dry_run": True, "result": result}

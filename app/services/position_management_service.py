@@ -130,9 +130,12 @@ def manage_position(db, account, state, api_key, secret_key, active_position, li
             # 먼저 새 보호 주문을 확보한 뒤 이전 주문을 취소한다.
             side = 'SELL' if position['side'] == 'LONG' else 'BUY'
             response = futures_stop_market_order_raw(api_key, secret_key, account.symbol, side, new_price, f'trail_{account.id}_{uuid.uuid4().hex[:16]}')
+            new_algo_id = response.get('algoId')
+            if not new_algo_id:
+                raise RuntimeError('새 손절 주문의 접수 번호를 확인할 수 없습니다.')
             if position.get('stop_algo_id'):
                 cancel_futures_algo_order_raw(api_key, secret_key, position['stop_algo_id'])
-            position['stop_algo_id'] = response['algoId']
+            position['stop_algo_id'] = new_algo_id
         position['stop_price'] = new_price
     runtime['position'] = position
     return runtime, {'status': 'holding', 'position': position}
