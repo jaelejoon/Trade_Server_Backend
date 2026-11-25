@@ -56,9 +56,9 @@ def test_rejects_invalid_query(client, invalid):
 
 @pytest.fixture
 def postgres_client(client):
-    database_url = os.getenv("BACKTEST_TEST_DATABASE_URL")
+    database_url = os.getenv("BACKTEST_TEST_DATABASE_URL") or os.getenv("TEST_DATABASE_URL")
     if not database_url:
-        pytest.skip("BACKTEST_TEST_DATABASE_URL이 설정된 PostgreSQL 테스트 환경이 필요합니다.")
+        pytest.skip("TEST_DATABASE_URL 또는 BACKTEST_TEST_DATABASE_URL이 설정된 PostgreSQL 테스트 환경이 필요합니다.")
     engine = create_engine(database_url)
     http, app = client
     try:
