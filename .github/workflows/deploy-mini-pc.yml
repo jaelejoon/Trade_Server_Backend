@@ -1,0 +1,85 @@
+name: 거래 백엔드 미니PC 배포
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trade-backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, trade-backend]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: 백엔드 이미지 빌드 및 배포
+        shell: bash
+        run: |
+          container=trade-backtest-api
+          network=trade-server-backend_default
+          test -r /home/joon/trade-server-backend/.env
+          test "$(docker inspect --format '{{.State.Running}} {{index .Config.Labels "com.docker.compose.project"}} {{index .Config.Labels "com.docker.compose.service"}}' "$container")" = 'true trade-server-backend trade-api'
+          test "$(docker inspect --format '{{range $name, $settings := .NetworkSettings.Networks}}{{$name}}{{println}}{{end}}' "$container")" = "$network"
+          test "$(docker inspect --format '{{len .Mounts}}' "$container")" = 0
+          test "$(docker port "$container" 8000/tcp)" = 127.0.0.1:8000
+          previous_image=$(docker inspect --format '{{.Image}}' "$container")
+          candidate_image="trade-backend-deploy:$GITHUB_SHA"
+          docker build --tag "$candidate_image" .
+
+          compose_file=$(mktemp)
+          trap 'rm -f "$compose_file"' EXIT
+          cat > "$compose_file" <<'COMPOSE'
+          services:
+            trade-api:
+              image: ${TRADE_DEPLOY_IMAGE:?}
+              container_name: trade-backtest-api
+              ports:
+                - "127.0.0.1:8000:8000"
+              env_file:
+                - /home/joon/trade-server-backend/.env
+              environment:
+                DRY_RUN: "true"
+                ENABLE_LIVE_TRADING: "false"
+              restart: unless-stopped
+          networks:
+            default:
+              external: true
+              name: trade-server-backend_default
+          COMPOSE
+
+          deploy() {
+            TRADE_DEPLOY_IMAGE="$1" docker compose --env-file /dev/null \
+              -p trade-server-backend -f "$compose_file" \
+              up -d --no-deps --no-build --pull never trade-api
+          }
+
+          healthy() {
+            for attempt in {1..15}; do
+              if curl -fsS --max-time 5 \
+                --resolve trade-server.duckdns.org:443:127.0.0.1 \
+                https://trade-server.duckdns.org/api/ |
+                python3 -c 'import json, sys; r = json.load(sys.stdin); sys.exit(not (r.get("status") == "ok" and r.get("dry_run") is True))' 2>/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          if ! deploy "$candidate_image" || ! healthy; then
+            echo '배포 검증 실패. 이전 이미지 복구를 시도합니다.' >&2
+            rollback_image="trade-backend-deploy:rollback-$GITHUB_RUN_ID"
+            docker tag "$previous_image" "$rollback_image"
+            deploy "$rollback_image"
+            healthy
+            exit 1
+          fi
