@@ -27,11 +27,18 @@ jobs:
           container=trade-backtest-api
           network=trade-server-backend_default
           test -r /home/joon/trade-server-backend/.env
-          test "$(docker inspect --format '{{.State.Running}} {{index .Config.Labels "com.docker.compose.project"}} {{index .Config.Labels "com.docker.compose.service"}}' "$container")" = 'true trade-server-backend trade-api'
+          test "$(docker inspect --format '{{.State.Running}} {{index .Config.Labels "com.docker.compose.service"}}' "$container")" = 'true trade-api'
+          project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container")
+          case "$project" in
+            trade-server-backend|trade-backend-release-*) ;;
+            *) echo '예상하지 못한 Compose 프로젝트입니다.' >&2; exit 1 ;;
+          esac
           test "$(docker inspect --format '{{range $name, $settings := .NetworkSettings.Networks}}{{$name}}{{println}}{{end}}' "$container")" = "$network"
           test "$(docker inspect --format '{{len .Mounts}}' "$container")" = 0
           test "$(docker port "$container" 8000/tcp)" = 127.0.0.1:8000
-          previous_image=$(docker inspect --format '{{.Image}}' "$container")
+          previous_container=$(docker inspect --format '{{.Id}}' "$container")
+          release_project="trade-backend-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          backup_container="$container-backup-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           candidate_image="trade-backend-deploy:$GITHUB_SHA"
           docker build --tag "$candidate_image" .
 
@@ -58,7 +65,7 @@ jobs:
 
           deploy() {
             TRADE_DEPLOY_IMAGE="$1" docker compose --env-file /dev/null \
-              -p trade-server-backend -f "$compose_file" \
+              -p "$release_project" -f "$compose_file" \
               up -d --no-deps --no-build --pull never trade-api
           }
 
@@ -75,11 +82,18 @@ jobs:
             return 1
           }
 
-          if ! deploy "$candidate_image" || ! healthy; then
-            echo '배포 검증 실패. 이전 이미지 복구를 시도합니다.' >&2
-            rollback_image="trade-backend-deploy:rollback-$GITHUB_RUN_ID"
-            docker tag "$previous_image" "$rollback_image"
-            deploy "$rollback_image"
-            healthy
-            exit 1
+          docker rename "$previous_container" "$backup_container"
+          if docker stop "$previous_container" && deploy "$candidate_image" && healthy; then
+            docker rm "$previous_container"
+            exit 0
           fi
+
+          echo '배포 검증 실패. 기존 컨테이너를 복구합니다.' >&2
+          if new_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container" 2>/dev/null); then
+            test "$new_project" = "$release_project"
+            docker rm -f "$container"
+          fi
+          docker rename "$previous_container" "$container"
+          docker start "$previous_container"
+          healthy
+          exit 1
