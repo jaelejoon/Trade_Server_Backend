@@ -25,6 +25,7 @@ from app.services.backtest_engine import (
     replay,
     validate_candles,
 )
+from app.services.strategy_1x_regimes import replay_regime
 from app.services.binance_service import binance_public_get
 
 
@@ -71,7 +72,7 @@ class RunRequest(BaseModel):
         strategy = STRATEGIES.get(self.strategy_id)
         if strategy is None or strategy.version != self.strategy_version:
             raise ValueError("지원하지 않는 전략 또는 전략 버전입니다.")
-        if strategy.loss_limits is not None and self.leverage != 1:
+        if strategy.one_x_only and self.leverage != 1:
             raise ValueError("1배 전용 전략은 레버리지 1만 허용합니다.")
         return self
 
@@ -131,16 +132,23 @@ def simulate(db, user_id, body):
     db.rollback()
     validate_candles(candles, warmup_start, end)
     funding, funding_status = load_funding(body)
-    result = replay(
-        candles.loc[start:], strategy.signals(candles), body.initial_equity_usdt,
-        body.leverage, body.fee_bps, body.slippage_bps, funding,
-        loss_limits=strategy.loss_limits,
-    )
+    if strategy.regime is not None:
+        result = replay_regime(
+            candles.loc[start:], strategy.regime.decisions(candles), strategy.regime.exposure,
+            body.initial_equity_usdt, body.fee_bps, body.slippage_bps, funding,
+        )
+    else:
+        result = replay(
+            candles.loc[start:], strategy.signals(candles), body.initial_equity_usdt,
+            body.leverage, body.fee_bps, body.slippage_bps, funding,
+            loss_limits=strategy.loss_limits,
+        )
     funding_hash = sha256(repr(sorted(funding.items())).encode()).hexdigest() if funding else None
     return {
         **result,
         "engine_version": ENGINE_VERSION,
-        "execution_model": "next_open_1m_stop_first_fixed_maintenance",
+        "execution_model": ("monthly_long_cash_next_open_1m" if strategy.regime
+                            else "next_open_1m_stop_first_fixed_maintenance"),
         "candle_count": len(candles),
         "candle_sha256": candle_checksum(candles),
         "funding": {

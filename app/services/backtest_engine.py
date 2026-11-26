@@ -7,6 +7,7 @@ from hashlib import sha256
 import numpy as np
 import pandas as pd
 
+from app.services.strategy_1x_regimes import REGIMES, MonthlyRegime
 from app.strategy import strategy_v57 as v57
 
 
@@ -58,8 +59,13 @@ class LossLimits:
 class Strategy:
     version: str
     warmup: pd.Timedelta
-    signals: Callable[[pd.DataFrame], dict[pd.Timestamp, Signal]]
+    signals: Callable[[pd.DataFrame], dict[pd.Timestamp, Signal]] | None
     loss_limits: LossLimits | None = None
+    regime: MonthlyRegime | None = None
+
+    @property
+    def one_x_only(self):
+        return self.loss_limits is not None or self.regime is not None
 
 
 def breakout_signals(candles, lookback, stop_fraction, reward, risk, exposure, hold_hours):
@@ -83,6 +89,8 @@ def breakout_signals(candles, lookback, stop_fraction, reward, risk, exposure, h
 
 
 STRATEGIES = {
+    **{name: Strategy("2", pd.Timedelta(days=397), None, regime=regime)
+       for name, regime in REGIMES.items()},
     "V57_LONG_SAFE_PUSH": Strategy("1", pd.Timedelta(hours=4 * 200), v57_signals),
     "SAFE_1X_AGGRESSIVE": Strategy(
         "1", pd.Timedelta(hours=12 + 1),

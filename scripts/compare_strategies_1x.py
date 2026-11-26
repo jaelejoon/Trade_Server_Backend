@@ -57,25 +57,21 @@ def hold(candles):
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path, help="BTCUSDT-1m-, BTCUSDT-fundingRate-, mark-BTCUSDT-1h- monthly ZIPs and daily-mark-BTCUSDT-1h- ZIPs for gaps")
-    args = parser.parse_args()
-
+def load_futures(directory):
     data_end = pd.Timestamp("2026-11-01")
     months = pd.period_range(DATA_START, data_end - pd.Timedelta(days=1), freq="M")
-    candles = read_months(args.directory, "BTCUSDT-1m", ["time", *CANDLE_COLUMNS], months)
+    candles = read_months(directory, "BTCUSDT-1m", ["time", *CANDLE_COLUMNS], months)
     candles.index = pd.to_datetime(candles.pop("time"), unit="ms")
     validate_candles(candles, DATA_START, data_end)
 
-    marks = read_months(args.directory, "mark-BTCUSDT-1h", ["time", "open"], months)
+    marks = read_months(directory, "mark-BTCUSDT-1h", ["time", "open"], months)
     daily_prefix = "daily-mark-BTCUSDT-1h"
     daily_dates = sorted(
         path.stem.removeprefix(daily_prefix + "-")
-        for path in args.directory.glob(f"{daily_prefix}-*.zip")
+        for path in directory.glob(f"{daily_prefix}-*.zip")
     )
     if daily_dates:
-        daily = read_months(args.directory, daily_prefix, ["time", "open"], daily_dates)
+        daily = read_months(directory, daily_prefix, ["time", "open"], daily_dates)
         marks = pd.concat([marks, daily.loc[~daily.time.isin(marks.time)]])
     marks.index = pd.to_datetime(marks.pop("time"), unit="ms")
     marks = marks.sort_index()
@@ -83,7 +79,7 @@ def main():
     if not marks.index.equals(expected_marks) or not (np.isfinite(marks.open) & (marks.open > 0)).all():
         raise ValueError("시간봉 마크가격이 누락되었거나 유효하지 않습니다.")
 
-    rates = read_months(args.directory, "BTCUSDT-fundingRate", ["time", "interval", "rate"], months)
+    rates = read_months(directory, "BTCUSDT-fundingRate", ["time", "interval", "rate"], months)
     times = pd.to_datetime(rates.time, unit="ms").dt.floor("min")
     boundaries = pd.DatetimeIndex([DATA_START, *times, data_end])
     if (times != times.dt.floor("h")).any() or times.duplicated().any() or (
@@ -92,6 +88,15 @@ def main():
     ) or not (np.isfinite(rates.rate) & (rates.rate.abs() <= 1)).all():
         raise ValueError("펀딩 이력에 공백이 있거나 유효하지 않습니다.")
     funding = dict(zip(times, zip(marks.open.reindex(times), rates.rate)))
+    return candles, funding
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path, help="BTCUSDT-1m-, BTCUSDT-fundingRate-, mark-BTCUSDT-1h- monthly ZIPs and daily-mark-BTCUSDT-1h- ZIPs for gaps")
+    args = parser.parse_args()
+
+    candles, funding = load_futures(args.directory)
 
     for label, (start, end) in WINDOWS.items():
         start, end = pd.Timestamp(start), pd.Timestamp(end)
@@ -99,6 +104,8 @@ def main():
         payments = {time: payment for time, payment in funding.items() if start <= time < end}
         rows = {"BTC_CASH_HOLD": hold(bars)}
         for name, strategy in STRATEGIES.items():
+            if strategy.regime is not None:
+                continue
             inputs = candles.loc[start.floor("4h") - strategy.warmup:bars.index[-1]]
             signals = {time: signal for time, signal in strategy.signals(inputs).items()
                        if start <= time < end}
