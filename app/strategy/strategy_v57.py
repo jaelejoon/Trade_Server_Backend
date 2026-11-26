@@ -372,6 +372,8 @@ class ClosedCandleAggregation:
     def __init__(self):
         self.minutes = None
         self.frames = None
+        self.features = None
+        self.feature_config = None
 
     def update(self, minutes):
         reusable = None
@@ -399,6 +401,8 @@ class ClosedCandleAggregation:
             frames.append(pd.concat([head, kept, tail]).sort_index())
 
         self.minutes = minutes.copy()
+        if self.frames is None or not all(old.equals(new) for old, new in zip(self.frames, frames)):
+            self.features = None
         self.frames = tuple(frames)
         return self.frames
 
@@ -450,7 +454,7 @@ def prepare_data(raw_df, *, aggregation=None):
     print(f"정렬/중복제거 후 데이터 수: {len(df)}")
 
     return prepare_closed_candles(
-        df.set_index("timestamp"), diagnostics=True, legacy_alignment=True, aggregation=aggregation,
+        df.set_index("timestamp"), diagnostics=aggregation is None, legacy_alignment=True, aggregation=aggregation,
     )
 
 
@@ -460,6 +464,9 @@ def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False, agg
         df_15m, df_1h, df_4h = (resample_ohlcv(df, rule) for rule in ClosedCandleAggregation.rules)
     else:
         df_15m, df_1h, df_4h = aggregation.update(df)
+        config = (legacy_alignment, tuple(repr(globals()[key]) for key in DEFAULT_V57_CONFIG))
+        if not diagnostics and aggregation.features is not None and aggregation.feature_config == config:
+            return tuple(frame.copy() for frame in aggregation.features)
 
     df_15m = add_common_indicators(df_15m, prefix="m15_")
     df_1h = add_common_indicators(df_1h, prefix="")
@@ -617,7 +624,11 @@ def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False, agg
     if diagnostics:
         print_signal_diagnostics(df_1h, df_15m, df_4h)
 
-    return df_1h.dropna(), df_15m.dropna()
+    result = df_1h.dropna(), df_15m.dropna()
+    if aggregation is not None:
+        aggregation.feature_config = config
+        aggregation.features = tuple(frame.copy() for frame in result)
+    return result
 
 
 def print_signal_diagnostics(df_1h, df_15m, df_4h):

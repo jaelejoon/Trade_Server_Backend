@@ -36,3 +36,20 @@ def test_incremental_spot_buckets_features_and_signal_match_full(monkeypatch):
         now = batch.index[-1] + pd.Timedelta(minutes=1)
         raw = batch.reset_index()
         assert v57.get_latest_v57_signal(raw, now, aggregation=cache) == v57.get_latest_v57_signal(raw, now)
+
+
+def test_indicators_are_reused_until_a_bucket_closes(monkeypatch):
+    candles = pd.DataFrame(
+        {column: 1.0 for column in ["open", "high", "low", "close", "volume"]},
+        index=pd.date_range("2025-01-01", periods=5000, freq="min"),
+    )
+    cache = v57.ClosedCandleAggregation()
+    expected = v57.prepare_closed_candles(candles.iloc[:4999], aggregation=cache)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unchanged closed buckets must reuse the indicators")
+
+    monkeypatch.setattr(v57, "add_common_indicators", unexpected)
+    actual = v57.prepare_closed_candles(candles, aggregation=cache)
+    for result, original in zip(actual, expected):
+        assert_frame_equal(result, original, check_freq=False)
