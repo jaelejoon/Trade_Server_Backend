@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from app.core.config import BOT_INTERVAL_SECONDS
+from app.core.config import BOT_INTERVAL_SECONDS, ENABLE_TRADING_SCHEDULER
 from app.db.session import SessionLocal
 from app.models.trading_account import TradingAccount
 from app.services.bot_service import execute_bot_tick
@@ -14,19 +14,21 @@ def get_job_id(trading_account_id: int) -> str:
 
 
 def bot_tick_job(trading_account_id: int):
+    if not ENABLE_TRADING_SCHEDULER:
+        return
     db = SessionLocal()
     try:
         account = db.query(TradingAccount).filter(TradingAccount.id == trading_account_id).first()
-        if not account or not account.is_running:
+        if not account or not account.is_running or account.market_type != "SPOT":
             return
         execute_bot_tick(db=db, account=account)
-    except Exception as exc:
+    except Exception:
         try:
             create_error_log(
                 db=db,
                 trading_account_id=trading_account_id,
                 source='bot_tick_job',
-                message=str(exc),
+                message='자동매매 작업 처리 실패',
             )
         except Exception:
             db.rollback()
@@ -35,6 +37,8 @@ def bot_tick_job(trading_account_id: int):
 
 
 def start_account_job(trading_account_id: int):
+    if not ENABLE_TRADING_SCHEDULER:
+        return
     job_id = get_job_id(trading_account_id)
     existing = scheduler.get_job(job_id)
     if existing:
@@ -64,16 +68,20 @@ def recover_running_account_jobs():
     db = SessionLocal()
     recovered = 0
     try:
-        accounts = db.query(TradingAccount).filter(TradingAccount.is_running == True).all()
+        accounts = db.query(TradingAccount).filter(TradingAccount.is_running == True, TradingAccount.market_type == "SPOT").all()
         for account in accounts:
-            start_account_job(account.id)
-            recovered += 1
+            execute_bot_tick(db, account, recover_only=True)
+            if account.is_running:
+                start_account_job(account.id)
+                recovered += 1
         return recovered
     finally:
         db.close()
 
 
 def start_scheduler():
+    if not ENABLE_TRADING_SCHEDULER:
+        return 0
     if not scheduler.running:
         scheduler.start()
     return recover_running_account_jobs()

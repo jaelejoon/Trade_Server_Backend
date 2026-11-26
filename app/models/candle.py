@@ -4,7 +4,7 @@ from app.db.base import Base
 
 
 class Candle1m(Base):
-    __tablename__ = "candles_1m"
+    __tablename__ = "spot_candles_1m"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False, index=True)
@@ -22,6 +22,6 @@ class Candle1m(Base):
             "user_id",
             "symbol",
             "open_time",
-            name="uq_user_symbol_open_time",
+            name="uq_spot_user_symbol_open_time",
         ),
     )

@@ -1,3 +1,5 @@
+from sqlalchemy.dialects.postgresql import JSONB
+
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 
 from app.core.security import now_utc
@@ -11,4 +13,5 @@ class BotSignalState(Base):
     trading_account_id = Column(Integer, ForeignKey("trading_accounts.id"), unique=True, nullable=False)
     last_signal_time = Column(String(100), nullable=True)
     last_strategy = Column(String(100), nullable=True)
+    runtime_state = Column(JSONB, nullable=False, default=dict)
     updated_at = Column(DateTime, default=now_utc)

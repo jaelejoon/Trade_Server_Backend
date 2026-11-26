@@ -1,24 +1,36 @@
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.core.config import CANDLE_WARMUP_DAYS, DRY_RUN
+from app.core.config import CANDLE_WARMUP_DAYS, ENABLE_SPOT_TESTNET_ORDERS, ENABLE_TRADING_SCHEDULER
 from app.core.jwt import get_current_user
+from app.core.trading_limits import normalize_trading_symbol
 from app.db.session import get_db
+from app.models.bot_signal_state import BotSignalState
 from app.models.error_log import ErrorLog
+from app.models.spot_fill import SpotFill
 from app.models.trade_log import TradeLog
 from app.models.trading_account import TradingAccount
 from app.models.user import User
+from app.routers.admin import require_admin
 from app.schemas import BotTickRequest, TradingAccountCreateRequest, TradingAccountResponse
 from app.scheduler.bot_scheduler import start_account_job, stop_account_job
-from app.services.account_service import get_api_key_owned_by_user, get_trading_account_owned_by_user
+from app.services.account_service import get_active_trading_account_owned_by_user, get_api_key_owned_by_user, get_trading_account_owned_by_user
 from app.services.binance_candle_sync import BinanceCandleSyncService
+from app.core.security import sanitize_sensitive_text
 from app.services.binance_service import get_decrypted_api_keys
-from app.services.bot_service import execute_bot_tick, reconcile_position_and_open_orders
+from app.services.bot_service import execute_bot_tick
+
+from app.services.spot_service import SpotExchange
+from app.services.spot_v12_runtime import strategy_status
+from app.services.spot_recovery_service import inspect_recovery
+from app.services.error_log_service import create_error_log
 
 router = APIRouter(tags=["trading"])
+
 
 
 def ensure_active_trading_account(account: TradingAccount):
@@ -41,9 +53,9 @@ def create_trading_account(
         user_id=current_user.id,
         api_key_id=body.api_key_id,
         symbol=body.symbol.upper(),
-        leverage=body.leverage,
         max_risk_ratio=body.max_risk_ratio,
         max_daily_loss_ratio=body.max_daily_loss_ratio,
+        dry_run=current_user.dry_run,
         is_running=False,
         is_active=True,
     )
@@ -69,6 +81,32 @@ def list_trading_accounts(
         .order_by(TradingAccount.id.desc())
         .all()
     )
+
+
+def _spot_journal(db, account_id):
+    state = db.query(BotSignalState).filter_by(trading_account_id=account_id).one_or_none()
+    journal = (state.runtime_state or {}).get("spot") if state else None
+    return journal if isinstance(journal, dict) else {}
+
+
+def _stored_stop(db, account):
+    if account.is_running:
+        return None, None
+    clauses = [and_(ErrorLog.source == "spot_recovery",
+                    ErrorLog.message == "봇 체결 기록 확인 필요")]
+    if _spot_journal(db, account.id).get("halted") is True:
+        clauses.append(and_(ErrorLog.source == "spot_lifecycle",
+                            ErrorLog.message != "거래소 잔고와 봇 보유량 불일치"))
+    log = (db.query(ErrorLog)
+           .filter(ErrorLog.trading_account_id == account.id, ErrorLog.user_id == account.user_id,
+                   or_(*clauses))
+           .order_by(ErrorLog.id.desc()).first())
+    if log is None:
+        return None, None
+    stopped_at = log.created_at
+    if stopped_at is not None and stopped_at.tzinfo is None:
+        stopped_at = stopped_at.replace(tzinfo=timezone.utc)
+    return log.message, stopped_at
 
 
 @router.get("/trading/status")
@@ -129,16 +167,19 @@ def trading_status(
             .first()
         )
 
+        stop_reason, stopped_at = _stored_stop(db, account)
         account_items.append(
             {
                 "id": account.id,
                 "api_key_id": account.api_key_id,
                 "market_type": account.market_type,
                 "symbol": account.symbol,
-                "leverage": account.leverage,
                 "max_risk_ratio": account.max_risk_ratio,
                 "max_daily_loss_ratio": account.max_daily_loss_ratio,
+                "dry_run": account.dry_run,
                 "is_running": account.is_running,
+                "stop_reason": stop_reason,
+                "stopped_at": stopped_at,
                 "is_active": account.is_active,
                 "created_at": account.created_at,
                 "latest_log": serialize_trade_log(account_latest_log),
@@ -147,8 +188,11 @@ def trading_status(
 
     return {
         "status": "ok",
-        "dry_run": DRY_RUN,
-        "is_live_trading": not DRY_RUN,
+        "scheduler_enabled": ENABLE_TRADING_SCHEDULER,
+        "dry_run": all(account.dry_run for account in accounts) if accounts else current_user.dry_run,
+        "is_live_trading": False,
+        "spot_testnet_orders_enabled": ENABLE_SPOT_TESTNET_ORDERS,
+        "enable_live_trading": current_user.enable_live_trading,
         "user_id": current_user.id,
         "summary": {
             "total_accounts": total_accounts,
@@ -173,13 +217,20 @@ def start_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
-    ensure_active_trading_account(account)
+    if not ENABLE_TRADING_SCHEDULER:
+        raise HTTPException(status_code=409, detail="자동매매 스케줄러가 꺼져 있습니다.")
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
+    try:
+        symbol = normalize_trading_symbol(account.symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if account.market_type != "SPOT":
+        raise HTTPException(status_code=409, detail="현물 계정을 새로 등록하세요.")
     sync_result = BinanceCandleSyncService.warmup_historical_1m_candles(
         db=db,
         user_id=current_user.id,
-        symbol=account.symbol,
+        symbol=symbol,
         days=CANDLE_WARMUP_DAYS,
     )
 
@@ -203,8 +254,7 @@ def stop_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
     account.is_running = False
     db.commit()
@@ -218,14 +268,29 @@ def stop_trading_account(
     }
 
 
+@router.post("/trading/accounts/{account_id}/spot-testnet-check", include_in_schema=False)
+def run_spot_testnet_check(
+    account_id: int,
+    action: Literal["entry", "reject_oco", "advance"],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    if not ENABLE_SPOT_TESTNET_ORDERS:
+        raise HTTPException(status_code=404, detail="현물 테스트넷 주문 검증이 꺼져 있습니다.")
+    account = get_active_trading_account_owned_by_user(db, current_user.id, account_id)
+    result = execute_bot_tick(db, account, test_entry=None if action == "advance" else action)
+    if ENABLE_TRADING_SCHEDULER and action == "entry" and result["status"] == "protected":
+        start_account_job(account_id)
+    return result
+
+
 @router.post("/bot/tick")
 def bot_tick(
     body: BotTickRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, body.trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, body.trading_account_id)
 
     return execute_bot_tick(db=db, account=account)
 
@@ -236,28 +301,133 @@ def reconcile_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
     api_key_item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
     api_key, secret_key = get_decrypted_api_keys(api_key_item)
 
-    return reconcile_position_and_open_orders(
-        api_key=api_key,
-        secret_key=secret_key,
-        symbol=account.symbol,
-    )
+    exchange = SpotExchange(api_key, secret_key)
+    recovery, orders = inspect_recovery(db, account.id, exchange)
+    if recovery["halt"]:
+        account.is_running = False
+        stop_account_job(account.id)
+    if recovery["alert"]:
+        create_error_log(
+            db, "spot_recovery", recovery["alert"], user_id=account.user_id,
+            trading_account_id=account.id, level="WARNING",
+        )
+    return {"recovery": recovery, "open_order_lists": orders}
+
+
+@router.get('/trading/accounts/{trading_account_id}/portfolio')
+def get_trading_account_portfolio(
+    trading_account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
+    api_key_item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
+    api_key, secret_key = get_decrypted_api_keys(api_key_item)
+
+    balances = SpotExchange(api_key, secret_key).account()["balances"]
+    return {"status": "ok", "symbol": account.symbol, "balances": balances}
+
+
+@router.get("/trading/accounts/{trading_account_id}/fills")
+def get_spot_fills(
+    trading_account_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    before_trade_id: int | None = Query(None, gt=0, le=9223372036854775807),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
+    query = db.query(SpotFill).filter(SpotFill.trading_account_id == account.id)
+    if before_trade_id is not None:
+        query = query.filter(SpotFill.trade_id < before_trade_id)
+    rows = query.order_by(SpotFill.trade_id.desc()).limit(limit + 1).all()
+    items = [
+        {"trade_id": str(row.trade_id), "order_id": str(row.order_id), "side": row.side,
+         "quantity": format(row.quantity, "f"), "commission": format(row.commission, "f"),
+         "commission_asset": row.commission_asset}
+        for row in rows[:limit]
+    ]
+    return {"trading_account_id": account.id, "symbol": account.symbol, "items": items,
+            "next_before_trade_id": items[-1]["trade_id"] if len(rows) > limit else None}
+
+
+@router.get("/trading/accounts/{trading_account_id}/oco")
+def get_bot_oco(
+    trading_account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
+    journal = _spot_journal(db, account.id)
+    client_id = journal.get("oco")
+    if not isinstance(client_id, str) or not client_id:
+        return {"trading_account_id": account.id, "oco": None}
+
+    item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
+    exchange = SpotExchange(*get_decrypted_api_keys(item))
+    oco = {"source": "bot_journal", "client_order_list_id": client_id,
+           "order_list_id": None, "stop_price": journal.get("stop"),
+           "take_profit_price": journal.get("target"), "quantity": None, "status": "UNKNOWN"}
+    order_list = exchange.lookup(client_id, order_list=True)
+    if (order_list and order_list.get("symbol") == account.symbol
+            and order_list.get("listClientOrderId") == client_id
+            and type(order_list.get("orderListId")) is int):
+        list_id = order_list["orderListId"]
+        oco["order_list_id"] = str(list_id)
+        oco["status"] = order_list.get("listOrderStatus") or "UNKNOWN"
+        legs = order_list.get("orders") or []
+        if len(legs) == 2:
+            orders = [exchange.lookup(leg["clientOrderId"]) for leg in legs]
+            if all(order and order.get("orderListId") == list_id
+                   and order.get("symbol") == account.symbol and order.get("side") == "SELL"
+                   for order in orders):
+                by_type = {order["type"]: order for order in orders}
+                stop = by_type.get("STOP_LOSS")
+                target = by_type.get("LIMIT_MAKER")
+                if stop and target:
+                    oco["stop_price"] = stop.get("stopPrice") or oco["stop_price"]
+                    oco["take_profit_price"] = target.get("price") or oco["take_profit_price"]
+                    if stop.get("origQty") == target.get("origQty"):
+                        oco["quantity"] = stop.get("origQty")
+    return {"trading_account_id": account.id, "oco": oco}
+
+
+@router.get("/trading/accounts/{trading_account_id}/strategy")
+def get_spot_strategy(
+    trading_account_id: int,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    result = strategy_status(db, trading_account_id, datetime.now(timezone.utc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="현물 계정을 찾을 수 없습니다.")
+    return result
 
 
 @router.get("/trading/logs")
 def trading_logs(
     limit: int = 100,
+    trading_account_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    query = db.query(TradeLog).filter(TradeLog.user_id == current_user.id)
+
+    if trading_account_id is not None:
+        account = get_trading_account_owned_by_user(
+            db=db,
+            user_id=current_user.id,
+            trading_account_id=trading_account_id,
+        )
+        query = query.filter(TradeLog.trading_account_id == account.id)
+
     logs = (
-        db.query(TradeLog)
-        .filter(TradeLog.user_id == current_user.id)
+        query
         .order_by(TradeLog.id.desc())
         .limit(limit)
         .all()
@@ -269,12 +439,16 @@ def trading_logs(
 @router.get("/trading/error-logs")
 def error_logs(
     limit: int = 100,
+    trading_account_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _admin: User = Depends(require_admin),
 ):
+    query = db.query(ErrorLog)
+    if trading_account_id is not None:
+        query = query.filter(ErrorLog.trading_account_id == trading_account_id)
+
     logs = (
-        db.query(ErrorLog)
-        .filter((ErrorLog.user_id == current_user.id) | (ErrorLog.user_id == None))
+        query
         .order_by(ErrorLog.id.desc())
         .limit(limit)
         .all()
@@ -287,8 +461,8 @@ def error_logs(
             "trading_account_id": log.trading_account_id,
             "level": log.level,
             "source": log.source,
-            "message": log.message,
-            "raw_data": log.raw_data,
+            "message": "자동매매 처리 중 오류가 발생했습니다.",
+            "raw_data": None,
             "created_at": log.created_at,
         }
         for log in logs
@@ -333,13 +507,11 @@ def delete_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(
+    account = get_active_trading_account_owned_by_user(
         db,
         current_user.id,
         trading_account_id,
     )
-
-    ensure_active_trading_account(account)
 
     if account.is_running:
         raise HTTPException(
@@ -388,7 +560,7 @@ def serialize_trade_log(log: TradeLog | None):
         "client_order_id": log.client_order_id,
         "emergency_close_executed": log.emergency_close_executed,
         "emergency_close_order_id": log.emergency_close_order_id,
-        "error_message": log.error_message,
-        "raw_response": log.raw_response,
+        "error_message": "자동매매 처리 중 오류가 발생했습니다." if log.error_message else None,
+        "raw_response": sanitize_sensitive_text(log.raw_response) if log.raw_response and not log.error_message else None,
         "created_at": log.created_at,
     }

@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import re
 import datetime
+from threading import RLock
+
 
 # ============================================================
 # V57_LONG_SAFE_PUSH
@@ -11,12 +13,10 @@ import datetime
 # - 청산 횟수 출력 유지
 # - LONG 강화
 # - LONG 손절 타이트
-# - SHORT 신호 정제
 #
 # 목표:
 # - 청산 0회 유지
 # - LONG 수익성 강화
-# - SHORT 품질 개선
 # - MDD -10% 내외 목표
 # ============================================================
 
@@ -25,9 +25,6 @@ INITIAL_CAPITAL = 10_000_000
 FEE_RATE = 0.0005
 SLIPPAGE = 0.0004
 
-ENABLE_LIQUIDATION_CHECK = True
-LIQUIDATION_LEVERAGE = 2.0
-LIQUIDATION_BUFFER_PCT = 0.05
 
 ATR_PERIOD = 14
 EMA_FAST = 20
@@ -75,7 +72,6 @@ MONTHLY_DD_STOP_PCT = -0.10
 PEAK_DD_STOP_PCT = -0.18
 
 USE_B_BREAKOUT_LONG = True
-USE_SHORT_CRASH = True
 
 # ============================================================
 # B LONG - V57 강화
@@ -101,22 +97,94 @@ B_MAX_POS_NORMAL = 0.60
 B_MAX_HOLD_BARS = 96
 
 # ============================================================
-# SHORT - V57 정제
 # ============================================================
 
-S_RSI_MIN = 22
 
 # V56: 51 → V57: 45
-S_RSI_MAX = 45
 
-S_ATR_PCT_MIN = 0.005
-S_BB_WIDTH_MIN = 0.020
-S_STOP_ATR_MULT = 1.22
-S_TAKE_PROFIT_R = 5.50
 
-S_RISK = 0.012
-S_MAX_POS = 0.25
-S_MAX_HOLD_BARS = 72
+
+
+# ============================================================
+# 서버 전략 설정 연동용 기본 설정/임시 오버라이드
+# ============================================================
+
+DEFAULT_V57_CONFIG = {
+    "INITIAL_CAPITAL": INITIAL_CAPITAL,
+    "FEE_RATE": FEE_RATE,
+    "SLIPPAGE": SLIPPAGE,
+    "ATR_PERIOD": ATR_PERIOD,
+    "EMA_FAST": EMA_FAST,
+    "EMA_SLOW": EMA_SLOW,
+    "EMA_REGIME": EMA_REGIME,
+    "BB_PERIOD": BB_PERIOD,
+    "BB_STD": BB_STD,
+    "MAX_OPEN_POSITIONS": MAX_OPEN_POSITIONS,
+    "MAX_TOTAL_POSITION_RATIO": MAX_TOTAL_POSITION_RATIO,
+    "MAX_TOTAL_RISK_RATIO": MAX_TOTAL_RISK_RATIO,
+    "COOLDOWN_BARS": COOLDOWN_BARS,
+    "MIN_STOP_PCT": MIN_STOP_PCT,
+    "MAX_STOP_PCT": MAX_STOP_PCT,
+    "ENABLE_BAD_HOUR_FILTER": ENABLE_BAD_HOUR_FILTER,
+    "BAD_ENTRY_HOURS_1H": BAD_ENTRY_HOURS_1H,
+    "ENABLE_EVENT_FILTER": ENABLE_EVENT_FILTER,
+    "BLOCK_ENTRY_ON_EXTREME_VOLATILITY": BLOCK_ENTRY_ON_EXTREME_VOLATILITY,
+    "EVENT_RISK_REDUCE_POSITION": EVENT_RISK_REDUCE_POSITION,
+    "EVENT_RISK_REDUCTION_MULT": EVENT_RISK_REDUCTION_MULT,
+    "ATR_SPIKE_LOOKBACK": ATR_SPIKE_LOOKBACK,
+    "ATR_SPIKE_MULT": ATR_SPIKE_MULT,
+    "ADX_CHANGE_LOOKBACK": ADX_CHANGE_LOOKBACK,
+    "ADX_SPIKE_THRESHOLD": ADX_SPIKE_THRESHOLD,
+    "EXTREME_ATR_PCT_1H": EXTREME_ATR_PCT_1H,
+    "EXTREME_BB_WIDTH_1H": EXTREME_BB_WIDTH_1H,
+    "EVENT_COOLDOWN_BARS": EVENT_COOLDOWN_BARS,
+    "ENABLE_TRAILING_STOP": ENABLE_TRAILING_STOP,
+    "TRAIL_START_R": TRAIL_START_R,
+    "TRAIL_ATR_MULT": TRAIL_ATR_MULT,
+    "TRAIL_LOCK_R": TRAIL_LOCK_R,
+    "ENABLE_EMA_EXIT": ENABLE_EMA_EXIT,
+    "EMA_EXIT_AFTER_R": EMA_EXIT_AFTER_R,
+    "ENABLE_EQUITY_GUARD": ENABLE_EQUITY_GUARD,
+    "DAILY_DD_STOP_PCT": DAILY_DD_STOP_PCT,
+    "MONTHLY_DD_STOP_PCT": MONTHLY_DD_STOP_PCT,
+    "PEAK_DD_STOP_PCT": PEAK_DD_STOP_PCT,
+    "USE_B_BREAKOUT_LONG": USE_B_BREAKOUT_LONG,
+    "B_RSI_MIN": B_RSI_MIN,
+    "B_RSI_MAX": B_RSI_MAX,
+    "B_ATR_PCT_MIN": B_ATR_PCT_MIN,
+    "B_BB_WIDTH_MIN": B_BB_WIDTH_MIN,
+    "B_STOP_ATR_MULT": B_STOP_ATR_MULT,
+    "B_TAKE_PROFIT_R": B_TAKE_PROFIT_R,
+    "B_RISK_STRONG": B_RISK_STRONG,
+    "B_RISK_NORMAL": B_RISK_NORMAL,
+    "B_MAX_POS_STRONG": B_MAX_POS_STRONG,
+    "B_MAX_POS_NORMAL": B_MAX_POS_NORMAL,
+    "B_MAX_HOLD_BARS": B_MAX_HOLD_BARS,
+}
+
+
+_config_lock = RLock()
+
+
+class V57ConfigOverride:
+    def __init__(self, config):
+        self.config = config or {}
+        self.previous_values = {}
+
+    def __enter__(self):
+        _config_lock.acquire()
+        for key, value in self.config.items():
+            if key not in DEFAULT_V57_CONFIG:
+                continue
+            self.previous_values[key] = globals()[key]
+            globals()[key] = value
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        for key, value in self.previous_values.items():
+            globals()[key] = value
+        _config_lock.release()
+        return False
 
 
 def days_from_civil(y, m, d):
@@ -289,13 +357,54 @@ def adx(df, period=14):
 
 
 def resample_ohlcv(df, rule):
-    return df.resample(rule).agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum"
-    }).dropna()
+    # 1분봉의 시작 시각을 입력받는다. 누락되거나 아직 완성되지 않은 봉은 제외한다.
+    grouped = df.resample(rule, label="left", closed="left")
+    result = grouped.agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+    expected = int(pd.Timedelta(rule) / pd.Timedelta(minutes=1))
+    return result.loc[grouped["close"].count() == expected].dropna()
+
+
+class ClosedCandleAggregation:
+    """Reuse complete OHLCV buckets across overlapping closed-minute windows."""
+
+    rules = ("15min", "1h", "4h")
+
+    def __init__(self):
+        self.minutes = None
+        self.frames = None
+        self.features = None
+        self.feature_config = None
+
+    def update(self, minutes):
+        reusable = None
+        if self.minutes is not None and not self.minutes.empty and not minutes.empty:
+            start = max(self.minutes.index[0], minutes.index[0])
+            end = min(self.minutes.index[-1], minutes.index[-1])
+            if start <= end and self.minutes.loc[start:end].equals(minutes.loc[start:end]):
+                reusable = (start, end)
+
+        frames = []
+        for i, rule in enumerate(self.rules):
+            if reusable is None:
+                frames.append(resample_ohlcv(minutes, rule))
+                continue
+            start, end = reusable
+            first = start.ceil(rule)
+            past_last = (end + pd.Timedelta(minutes=1)).floor(rule)
+            if first >= past_last:
+                frames.append(resample_ohlcv(minutes, rule))
+                continue
+            previous = self.frames[i]
+            kept = previous[(previous.index >= first) & (previous.index < past_last)]
+            head = resample_ohlcv(minutes[minutes.index < first], rule)
+            tail = resample_ohlcv(minutes[minutes.index >= past_last], rule)
+            frames.append(pd.concat([head, kept, tail]).sort_index())
+
+        self.minutes = minutes.copy()
+        if self.frames is None or not all(old.equals(new) for old, new in zip(self.frames, frames)):
+            self.features = None
+        self.frames = tuple(frames)
+        return self.frames
 
 
 def add_common_indicators(df, prefix=""):
@@ -321,20 +430,7 @@ def add_common_indicators(df, prefix=""):
     return out
 
 
-def calc_liquidation_price(entry_price, side):
-    if not ENABLE_LIQUIDATION_CHECK:
-        return np.nan
-
-    if LIQUIDATION_LEVERAGE <= 1:
-        return np.nan
-
-    if side == "LONG":
-        return entry_price * (1 - (1 / LIQUIDATION_LEVERAGE) + LIQUIDATION_BUFFER_PCT)
-
-    return entry_price * (1 + (1 / LIQUIDATION_LEVERAGE) - LIQUIDATION_BUFFER_PCT)
-
-
-def prepare_data(raw_df):
+def prepare_data(raw_df, *, aggregation=None):
     df = raw_df.copy()
 
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -357,11 +453,20 @@ def prepare_data(raw_df):
     print(df["timestamp"].min(), "~", df["timestamp"].max())
     print(f"정렬/중복제거 후 데이터 수: {len(df)}")
 
-    df = df.set_index("timestamp")
+    return prepare_closed_candles(
+        df.set_index("timestamp"), diagnostics=aggregation is None, legacy_alignment=True, aggregation=aggregation,
+    )
 
-    df_15m = resample_ohlcv(df, "15min")
-    df_1h = resample_ohlcv(df, "1h")
-    df_4h = resample_ohlcv(df, "4h")
+
+def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False, aggregation=None):
+    """Build V57 features from sorted, UTC-indexed closed one-minute candles."""
+    if aggregation is None:
+        df_15m, df_1h, df_4h = (resample_ohlcv(df, rule) for rule in ClosedCandleAggregation.rules)
+    else:
+        df_15m, df_1h, df_4h = aggregation.update(df)
+        config = (legacy_alignment, tuple(repr(globals()[key]) for key in DEFAULT_V57_CONFIG))
+        if not diagnostics and aggregation.features is not None and aggregation.feature_config == config:
+            return tuple(frame.copy() for frame in aggregation.features)
 
     df_15m = add_common_indicators(df_15m, prefix="m15_")
     df_1h = add_common_indicators(df_1h, prefix="")
@@ -374,7 +479,7 @@ def prepare_data(raw_df):
         "h4_ema_fast",
         "h4_ema_slow",
         "h4_ema_regime"
-    ]].shift(1)
+    ]].shift(1, freq=None if legacy_alignment else "4h")
 
     df_1h["atr_pct_ma"] = df_1h["atr_pct"].rolling(ATR_SPIKE_LOOKBACK).mean()
 
@@ -465,37 +570,16 @@ def prepare_data(raw_df):
             (df_1h["bb_width"] >= B_BB_WIDTH_MIN)
     )
 
-    df_1h["signal_short_crash_raw"] = (
-            USE_SHORT_CRASH &
-            (df_1h["market_regime"] == "BEAR") &
-            (df_1h["close"] < df_1h["ema_fast"]) &
-            (df_1h["close"] < df_1h["open"]) &
-            (df_1h["close"] < df_1h["prev_close"]) &
-            (df_1h["rsi"] >= S_RSI_MIN) &
-            (df_1h["rsi"] <= S_RSI_MAX) &
-            (df_1h["atr_pct"] >= S_ATR_PCT_MIN) &
-            (df_1h["bb_width"] >= S_BB_WIDTH_MIN)
-    )
-
     if ENABLE_EVENT_FILTER and BLOCK_ENTRY_ON_EXTREME_VOLATILITY:
         df_1h["signal_b_breakout_long"] = df_1h["signal_b_breakout_long_raw"] & (~df_1h["extreme_volatility"])
-        df_1h["signal_short_crash"] = df_1h["signal_short_crash_raw"] & (~df_1h["extreme_volatility"])
     else:
         df_1h["signal_b_breakout_long"] = df_1h["signal_b_breakout_long_raw"]
-        df_1h["signal_short_crash"] = df_1h["signal_short_crash_raw"]
 
     if ENABLE_BAD_HOUR_FILTER:
         df_1h["signal_b_breakout_long"] &= ~df_1h["bad_entry_hour_1h"]
-        df_1h["signal_short_crash"] &= ~df_1h["bad_entry_hour_1h"]
 
     df_1h["signal_strategy_1h"] = np.where(
-        df_1h["signal_b_breakout_long"],
-        "B_1H_BREAKOUT_LONG",
-        np.where(
-            df_1h["signal_short_crash"],
-            "S_SHORT_CRASH",
-            "NONE"
-        )
+        df_1h["signal_b_breakout_long"], "B_1H_BREAKOUT_LONG", "NONE"
     )
 
     df_1h["entry_signal_1h"] = df_1h["signal_strategy_1h"] != "NONE"
@@ -511,7 +595,7 @@ def prepare_data(raw_df):
         "ema_regime",
         "atr_pct",
         "bb_width"
-    ]].shift(1)
+    ]].shift(1, freq=None if legacy_alignment else "1h")
 
     h1_context = h1_context.rename(columns={
         "market_regime": "h1_market_regime",
@@ -537,9 +621,14 @@ def prepare_data(raw_df):
     df_15m["signal_strategy_15m"] = "NONE"
     df_15m["entry_signal_15m"] = False
 
-    print_signal_diagnostics(df_1h, df_15m, df_4h)
+    if diagnostics:
+        print_signal_diagnostics(df_1h, df_15m, df_4h)
 
-    return df_1h.dropna(), df_15m.dropna()
+    result = df_1h.dropna(), df_15m.dropna()
+    if aggregation is not None:
+        aggregation.feature_config = config
+        aggregation.features = tuple(frame.copy() for frame in result)
+    return result
 
 
 def print_signal_diagnostics(df_1h, df_15m, df_4h):
@@ -553,7 +642,6 @@ def print_signal_diagnostics(df_1h, df_15m, df_4h):
     print()
     print("[1H 전략별 신호]")
     print(f"B_1H_BREAKOUT_LONG raw/final: {int(df_1h['signal_b_breakout_long_raw'].sum())} / {int(df_1h['signal_b_breakout_long'].sum())}")
-    print(f"S_SHORT_CRASH raw/final: {int(df_1h['signal_short_crash_raw'].sum())} / {int(df_1h['signal_short_crash'].sum())}")
 
     print()
     print("[최종 신호]")
@@ -571,8 +659,6 @@ def print_signal_diagnostics(df_1h, df_15m, df_4h):
 
 
 def get_strategy_side(strategy):
-    if strategy == "S_SHORT_CRASH":
-        return "SHORT"
     return "LONG"
 
 
@@ -587,15 +673,6 @@ def get_strategy_config(strategy, market_regime, event_risk):
             "stop_atr_mult": B_STOP_ATR_MULT,
             "take_profit_r": B_TAKE_PROFIT_R,
             "max_hold_bars": B_MAX_HOLD_BARS
-        }
-
-    elif strategy == "S_SHORT_CRASH":
-        config = {
-            "risk_per_trade": S_RISK,
-            "max_position_ratio": S_MAX_POS,
-            "stop_atr_mult": S_STOP_ATR_MULT,
-            "take_profit_r": S_TAKE_PROFIT_R,
-            "max_hold_bars": S_MAX_HOLD_BARS
         }
 
     else:
@@ -637,7 +714,7 @@ def build_signal_events(df_1h, df_15m):
         if bool(row["entry_signal_1h"]):
             strategy = row["signal_strategy_1h"]
             events.append({
-                "time": time,
+                "time": time + pd.Timedelta(hours=1),
                 "timeframe": "1H",
                 "side": get_strategy_side(strategy),
                 "strategy": strategy,
@@ -712,7 +789,34 @@ def should_block_new_entry(equity, equity_peak, day_start_equity, month_start_eq
     return False, ""
 
 
-def backtest(df_15m, signal_events):
+def advance_position(position, row, exchange_managed=False):
+    """현재 손절을 먼저 검사하고, 새 추적 손절은 다음 봉부터 적용한다."""
+    side = position["side"]
+    entry = position["entry_price"]
+    long = side == "LONG"
+    position["bars_held"] += 1
+    favorable = (row["high"] - entry) if long else (entry - row["low"])
+    adverse = (row["low"] - entry) if long else (entry - row["high"])
+    position["max_favorable_r"] = max(position["max_favorable_r"], favorable / position["initial_risk"])
+    position["max_adverse_r"] = min(position["max_adverse_r"], adverse / position["initial_risk"])
+    if not exchange_managed:
+        stop = position["stop_price"]
+        if (long and row["low"] <= stop) or (not long and row["high"] >= stop):
+            reason = "TRAIL_STOP" if position.get("trailing_stop_activated") else "STOP"
+            return reason, min(row["open"], stop) if long else max(row["open"], stop)
+        target = position["take_profit_price"]
+        if (long and row["high"] >= target) or (not long and row["low"] <= target):
+            return "BIG_TAKE_PROFIT", target
+    if ENABLE_EMA_EXIT and position["max_favorable_r"] >= EMA_EXIT_AFTER_R:
+        if (long and row["close"] < row["m15_ema_slow"]) or (not long and row["close"] > row["m15_ema_slow"]):
+            return "EMA_TREND_EXIT", row["close"]
+    if position["bars_held"] >= position["max_hold_bars"]:
+        return "TIME_EXIT", row["close"]
+    update_trailing_stop(position, row)
+    return None, None
+
+
+def backtest(df_15m, signal_events, funding_rates=None):
     balance = INITIAL_CAPITAL
     equity_curve = []
     trades = []
@@ -729,6 +833,13 @@ def backtest(df_15m, signal_events):
     guard_block_count = 0
     guard_last_reason = ""
     liquidation_count = 0
+    funding_by_bar = {}
+    for payment in funding_rates or []:
+        funding_time = pd.Timestamp(payment['fundingTime'], unit='ms')
+        bar_time = funding_time.floor('15min')
+        if funding_time != bar_time:
+            raise ValueError("펀딩 시각이 15분 경계와 일치하지 않아 정확히 계산할 수 없습니다.")
+        funding_by_bar.setdefault(bar_time, []).append(payment)
 
     if signal_events.empty:
         signal_events_by_time = {}
@@ -747,7 +858,13 @@ def backtest(df_15m, signal_events):
         high = row["high"]
         low = row["low"]
 
-        unrealized_before = calc_unrealized_pnl(positions, close)
+        for payment in funding_by_bar.get(time, []):
+            for position in positions:
+                sign = 1 if position['side'] == 'LONG' else -1
+                cost = sign * position['qty'] * float(payment['markPrice']) * float(payment['fundingRate'])
+                balance -= cost
+                position['realized_pnl'] -= cost
+        unrealized_before = calc_unrealized_pnl(positions, open_price)
         current_equity_before = balance + unrealized_before
 
         date_key = time.date()
@@ -766,135 +883,8 @@ def backtest(df_15m, signal_events):
         if cooldown > 0:
             cooldown -= 1
 
-        remaining_positions = []
-
-        for position in positions:
-            position["bars_held"] += 1
-
-            entry_price = position["entry_price"]
-            qty = position["qty"]
-            side = position["side"]
-
-            if side == "LONG":
-                current_favorable_r = (high - entry_price) / position["initial_risk"]
-                current_adverse_r = (low - entry_price) / position["initial_risk"]
-            else:
-                current_favorable_r = (entry_price - low) / position["initial_risk"]
-                current_adverse_r = (entry_price - high) / position["initial_risk"]
-
-            position["max_favorable_r"] = max(position["max_favorable_r"], current_favorable_r)
-            position["max_adverse_r"] = min(position["max_adverse_r"], current_adverse_r)
-
-            update_trailing_stop(position, row)
-
-            exit_reason = None
-            exit_price = None
-
-            if ENABLE_LIQUIDATION_CHECK:
-                if side == "LONG" and low <= position["liquidation_price"]:
-                    exit_reason = "LIQUIDATION"
-                    exit_price = position["liquidation_price"]
-                    liquidation_count += 1
-
-                elif side == "SHORT" and high >= position["liquidation_price"]:
-                    exit_reason = "LIQUIDATION"
-                    exit_price = position["liquidation_price"]
-                    liquidation_count += 1
-
-            if exit_reason is None:
-                if side == "LONG":
-                    if low <= position["stop_price"]:
-                        exit_reason = "TRAIL_STOP" if position.get("trailing_stop_activated", False) else "STOP"
-                        exit_price = position["stop_price"]
-
-                    elif high >= position["take_profit_price"]:
-                        exit_reason = "BIG_TAKE_PROFIT"
-                        exit_price = position["take_profit_price"]
-
-                    elif ENABLE_EMA_EXIT and position["max_favorable_r"] >= EMA_EXIT_AFTER_R:
-                        if close < row["m15_ema_slow"]:
-                            exit_reason = "EMA_TREND_EXIT"
-                            exit_price = close
-
-                else:
-                    if high >= position["stop_price"]:
-                        exit_reason = "TRAIL_STOP" if position.get("trailing_stop_activated", False) else "STOP"
-                        exit_price = position["stop_price"]
-
-                    elif low <= position["take_profit_price"]:
-                        exit_reason = "BIG_TAKE_PROFIT"
-                        exit_price = position["take_profit_price"]
-
-                    elif ENABLE_EMA_EXIT and position["max_favorable_r"] >= EMA_EXIT_AFTER_R:
-                        if close > row["m15_ema_slow"]:
-                            exit_reason = "EMA_TREND_EXIT"
-                            exit_price = close
-
-            if exit_reason is None and position["bars_held"] >= position["max_hold_bars"]:
-                exit_reason = "TIME_EXIT"
-                exit_price = close
-
-            if exit_reason is not None:
-                if side == "LONG":
-                    exit_price = exit_price * (1 - SLIPPAGE)
-                    gross_pnl = qty * (exit_price - entry_price)
-                else:
-                    exit_price = exit_price * (1 + SLIPPAGE)
-                    gross_pnl = qty * (entry_price - exit_price)
-
-                exit_fee = qty * exit_price * FEE_RATE
-                total_pnl = position["realized_pnl"] + gross_pnl - exit_fee
-
-                balance += gross_pnl - exit_fee
-
-                trades.append({
-                    "trade_id": position["trade_id"],
-                    "side": side,
-                    "timeframe": position["timeframe"],
-                    "strategy": position["strategy"],
-                    "market_regime": position["market_regime"],
-                    "risk_per_trade": position["risk_per_trade"],
-                    "original_risk_per_trade": position["original_risk_per_trade"],
-                    "max_position_ratio": position["max_position_ratio"],
-                    "leverage": position["leverage"],
-                    "liquidation_price": position["liquidation_price"],
-                    "entry_time": position["entry_time"],
-                    "exit_time": time,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "stop_price": position["stop_price"],
-                    "take_profit_price": position["take_profit_price"],
-                    "qty": qty,
-                    "position_value": position["position_value"],
-                    "entry_fee": position["entry_fee"],
-                    "exit_fee": exit_fee,
-                    "pnl": total_pnl,
-                    "r_multiple": total_pnl / position["initial_risk_amount"] if position["initial_risk_amount"] > 0 else 0,
-                    "exit_reason": exit_reason,
-                    "bars_held": position["bars_held"],
-                    "max_favorable_r": position["max_favorable_r"],
-                    "max_adverse_r": position["max_adverse_r"],
-                    "trailing_stop_activated": position.get("trailing_stop_activated", False),
-                    "entry_rsi": position["entry_rsi"],
-                    "entry_h4_adx": position["entry_h4_adx"],
-                    "entry_bb_width": position["entry_bb_width"],
-                    "entry_atr_pct": position["entry_atr_pct"],
-                    "entry_event_risk": position["entry_event_risk"],
-                    "balance": balance
-                })
-
-                cooldown = COOLDOWN_BARS
-            else:
-                remaining_positions.append(position)
-
-        positions = remaining_positions
-
-        unrealized_after_exit = calc_unrealized_pnl(positions, close)
-        current_equity_after_exit = balance + unrealized_after_exit
-        equity_peak = max(equity_peak, current_equity_after_exit)
-
         entry_blocked, guard_reason = should_block_new_entry(
-            current_equity_after_exit,
+            current_equity_before,
             equity_peak,
             day_start_equity,
             month_start_equity
@@ -904,13 +894,12 @@ def backtest(df_15m, signal_events):
             guard_block_count += 1
             guard_last_reason = guard_reason
 
-        if (not entry_blocked) and len(positions) < MAX_OPEN_POSITIONS and cooldown == 0:
+        if (not entry_blocked) and len(positions) < min(MAX_OPEN_POSITIONS, 1) and cooldown == 0:
             current_events = signal_events_by_time.get(time, [])
 
             if current_events:
                 priority = {
                     "B_1H_BREAKOUT_LONG": 1,
-                    "S_SHORT_CRASH": 2
                 }
 
                 sorted_signals = sorted(
@@ -919,7 +908,7 @@ def backtest(df_15m, signal_events):
                 )
 
                 for signal in sorted_signals:
-                    if len(positions) >= MAX_OPEN_POSITIONS:
+                    if len(positions) >= min(MAX_OPEN_POSITIONS, 1):
                         break
 
                     config = get_strategy_config(
@@ -998,7 +987,6 @@ def backtest(df_15m, signal_events):
 
                     balance -= entry_fee
 
-                    liquidation_price = calc_liquidation_price(entry_price, side)
 
                     position = {
                         "trade_id": trade_id_seq,
@@ -1009,8 +997,6 @@ def backtest(df_15m, signal_events):
                         "risk_per_trade": risk_per_trade,
                         "original_risk_per_trade": config["original_risk_per_trade"],
                         "max_position_ratio": max_position_ratio,
-                        "leverage": LIQUIDATION_LEVERAGE,
-                        "liquidation_price": liquidation_price,
                         "entry_time": time,
                         "entry_price": entry_price,
                         "stop_price": stop_price,
@@ -1035,6 +1021,73 @@ def backtest(df_15m, signal_events):
 
                     positions.append(position)
                     trade_id_seq += 1
+
+        remaining_positions = []
+
+        for position in positions:
+            entry_price = position["entry_price"]
+            qty = position["qty"]
+            side = position["side"]
+            exit_reason, exit_price = advance_position(position, row)
+            if exit_reason == "LIQUIDATION":
+                liquidation_count += 1
+
+            if exit_reason is not None:
+                if side == "LONG":
+                    exit_price = exit_price * (1 - SLIPPAGE)
+                    gross_pnl = qty * (exit_price - entry_price)
+                else:
+                    exit_price = exit_price * (1 + SLIPPAGE)
+                    gross_pnl = qty * (entry_price - exit_price)
+
+                exit_fee = qty * exit_price * FEE_RATE
+                total_pnl = position["realized_pnl"] + gross_pnl - exit_fee
+
+                balance += gross_pnl - exit_fee
+
+                trades.append({
+                    "trade_id": position["trade_id"],
+                    "side": side,
+                    "timeframe": position["timeframe"],
+                    "strategy": position["strategy"],
+                    "market_regime": position["market_regime"],
+                    "risk_per_trade": position["risk_per_trade"],
+                    "original_risk_per_trade": position["original_risk_per_trade"],
+                    "max_position_ratio": position["max_position_ratio"],
+                    "entry_time": position["entry_time"],
+                    "exit_time": time,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "stop_price": position["stop_price"],
+                    "take_profit_price": position["take_profit_price"],
+                    "qty": qty,
+                    "position_value": position["position_value"],
+                    "entry_fee": position["entry_fee"],
+                    "exit_fee": exit_fee,
+                    "pnl": total_pnl,
+                    "r_multiple": total_pnl / position["initial_risk_amount"] if position["initial_risk_amount"] > 0 else 0,
+                    "exit_reason": exit_reason,
+                    "bars_held": position["bars_held"],
+                    "max_favorable_r": position["max_favorable_r"],
+                    "max_adverse_r": position["max_adverse_r"],
+                    "trailing_stop_activated": position.get("trailing_stop_activated", False),
+                    "entry_rsi": position["entry_rsi"],
+                    "entry_h4_adx": position["entry_h4_adx"],
+                    "entry_bb_width": position["entry_bb_width"],
+                    "entry_atr_pct": position["entry_atr_pct"],
+                    "entry_event_risk": position["entry_event_risk"],
+                    "balance": balance
+                })
+
+                cooldown = COOLDOWN_BARS + 1
+            else:
+                remaining_positions.append(position)
+
+        positions = remaining_positions
+
+        unrealized_after_exit = calc_unrealized_pnl(positions, close)
+        current_equity_after_exit = balance + unrealized_after_exit
+        equity_peak = max(equity_peak, current_equity_after_exit)
 
         unrealized = calc_unrealized_pnl(positions, close)
         equity_now = balance + unrealized
@@ -1067,6 +1120,7 @@ def calculate_mdd_from_equity(equity_series):
     if equity_series is None or len(equity_series) == 0:
         return 0
 
+    equity_series = pd.concat([pd.Series([INITIAL_CAPITAL]), pd.Series(equity_series).reset_index(drop=True)], ignore_index=True)
     cummax = equity_series.cummax()
     drawdown = equity_series / cummax - 1
 
@@ -1089,6 +1143,7 @@ def calculate_max_losing_streak(trades_df):
 
 def calculate_stats(trades_df, equity_df=None):
     if trades_df.empty:
+        final_equity = equity_df["equity"].iloc[-1] if equity_df is not None and not equity_df.empty else INITIAL_CAPITAL
         return {
             "trades": 0,
             "pnl": 0,
@@ -1098,9 +1153,9 @@ def calculate_stats(trades_df, equity_df=None):
             "expectancy": 0,
             "avg_r": 0,
             "pf": 0,
-            "mdd": 0,
-            "return_pct": 0,
-            "final_equity": INITIAL_CAPITAL,
+            "mdd": calculate_mdd_from_equity(equity_df["equity"]) if equity_df is not None and not equity_df.empty else 0,
+            "return_pct": (final_equity / INITIAL_CAPITAL - 1) * 100,
+            "final_equity": final_equity,
             "failed_1r": 0,
             "max_losing_streak": 0,
             "worst_trade": 0,
@@ -1327,12 +1382,23 @@ def _to_optional_float(value):
         return None
 
 
-def get_latest_v57_signal(raw_df: pd.DataFrame) -> V57SignalResult:
+def get_latest_v57_signal(raw_df: pd.DataFrame, now=None, *, aggregation=None) -> V57SignalResult:
     if raw_df is None or raw_df.empty:
         return empty_signal("NO_RAW_DATA")
 
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+    now = now.tz_localize(None)
+    raw_df = raw_df.copy()
+    timestamps = pd.to_datetime(raw_df["timestamp"], utc=True).dt.tz_localize(None)
+    raw_df["timestamp"] = timestamps
+    raw_df = raw_df.loc[timestamps < now.floor("min")]
+    if raw_df.empty or raw_df["timestamp"].max() < now.floor("min") - pd.Timedelta(minutes=2):
+        return empty_signal("STALE_CANDLE_DATA")
+
     try:
-        df_1h, df_15m = prepare_data(raw_df)
+        df_1h, df_15m = (prepare_data(raw_df) if aggregation is None
+                         else prepare_data(raw_df, aggregation=aggregation))
     except Exception as exc:
         return empty_signal(f"PREPARE_DATA_ERROR: {exc}")
 
@@ -1369,6 +1435,10 @@ def get_latest_v57_signal(raw_df: pd.DataFrame) -> V57SignalResult:
         )
 
     latest_signal = signal_events.iloc[-1]
+    if pd.Timestamp(latest_signal["time"]) != now.floor("h"):
+        return empty_signal("NO_CURRENT_CLOSED_1H_SIGNAL")
+    if now - pd.Timestamp(latest_signal["time"]) > pd.Timedelta(minutes=5):
+        return empty_signal("SIGNAL_EXPIRED")
 
     config = get_strategy_config(
         latest_signal["strategy"],

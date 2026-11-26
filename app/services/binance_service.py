@@ -1,38 +1,55 @@
 import hashlib
 import hmac
+import logging
 import time
-from decimal import Decimal, ROUND_DOWN
-from functools import lru_cache
+from decimal import Decimal, InvalidOperation
 from typing import Literal, Optional
 from urllib.parse import urlencode
 
-import pandas as pd
 import requests
 from fastapi import HTTPException
 
 from app.core.config import (
-    BINANCE_FUTURES_BASE_URL,
     BINANCE_MAX_RETRIES,
     BINANCE_REQUEST_TIMEOUT_SECONDS,
     BINANCE_RETRY_BASE_SLEEP_SECONDS,
     BINANCE_SPOT_BASE_URL,
+    BINANCE_TESTNET,
     SERVER_TIME_DRIFT_LIMIT_MS,
+    ENABLE_SPOT_TESTNET_ORDERS,
+    SPOT_TESTNET_MAX_ORDER_USDT,
+    SPOT_TESTNET_URL,
 )
 from app.core.security import decrypt_text
 from app.models.binance_api_key import BinanceApiKey
 
+# urllib3 DEBUG 로그에는 서명된 요청 경로가 포함될 수 있다.
+logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
+
 RETRYABLE_BINANCE_CODES = {-1001, -1007, -1021}
 
 
+class OrderExecutionUnknown(RuntimeError):
+    """주문 결과가 불명확하다. 상태 확인 전에는 주문을 다시 보내지 않는다."""
+
+
 def get_decrypted_api_keys(item: BinanceApiKey):
-    return decrypt_text(item.api_key_encrypted), decrypt_text(item.secret_key_encrypted)
+    try:
+        return decrypt_text(item.api_key_encrypted), decrypt_text(item.secret_key_encrypted)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="API Key 복호화에 실패했습니다.") from exc
 
 
 def _parse_response(response: requests.Response):
     try:
         return response.json()
-    except Exception:
-        return {'raw': response.text}
+    except ValueError:
+        return None
+
+
+def _binance_error_code(data) -> Optional[int]:
+    code = data.get('code') if isinstance(data, dict) else None
+    return code if type(code) is int else None
 
 
 def _raise_binance_error(response: requests.Response, data):
@@ -41,7 +58,7 @@ def _raise_binance_error(response: requests.Response, data):
         detail={
             'message': 'Binance API 요청 실패',
             'binance_status': response.status_code,
-            'binance_response': data,
+            'binance_code': _binance_error_code(data),
         },
     )
 
@@ -65,10 +82,33 @@ def binance_signed_request(
     secret_key: str,
     params: Optional[dict] = None,
 ):
-    if params is None:
-        params = {}
-
-    last_error = None
+    allowed_paths = {
+        "GET": {"/api/v3/account", "/api/v3/order", "/api/v3/orderList",
+                "/api/v3/openOrderList", "/api/v3/myTrades", "/sapi/v1/account/apiRestrictions"},
+        "POST": {"/api/v3/order", "/api/v3/orderList/oco"},
+    }
+    if base_url != BINANCE_SPOT_BASE_URL or path not in allowed_paths.get(method, set()):
+        raise HTTPException(status_code=403, detail="현물 요청 경로가 허용되지 않습니다.")
+    params = params or {}
+    if method != "GET":
+        if not ENABLE_SPOT_TESTNET_ORDERS or not BINANCE_TESTNET or base_url != SPOT_TESTNET_URL:
+            raise HTTPException(status_code=403, detail="현물 쓰기 요청이 허용되지 않습니다.")
+        if params.get("symbol") != "BTCUSDT":
+            raise HTTPException(status_code=400, detail="BTCUSDT만 주문할 수 있습니다.")
+        if params.get("side") == "BUY":
+            try:
+                quote = Decimal(str(params.get("quoteOrderQty")))
+                allowed = (
+                    path == "/api/v3/order" and params.get("type") == "MARKET"
+                    and "quantity" not in params and "price" not in params
+                    and quote.is_finite() and 0 < quote <= SPOT_TESTNET_MAX_ORDER_USDT
+                )
+            except InvalidOperation:
+                allowed = False
+            if not allowed:
+                raise HTTPException(status_code=400, detail="검증 매수 금액 또는 주문 방식이 허용 범위를 벗어났습니다.")
+        elif params.get("side") != "SELL":
+            raise HTTPException(status_code=400, detail="검증 주문 방향이 올바르지 않습니다.")
 
     for attempt in range(BINANCE_MAX_RETRIES):
         request_params = dict(params)
@@ -87,39 +127,47 @@ def binance_signed_request(
 
         try:
             if method == 'GET':
-                response = requests.get(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS)
+                response = requests.get(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
             elif method == 'POST':
-                response = requests.post(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS)
+                response = requests.post(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
             elif method == 'DELETE':
-                response = requests.delete(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS)
+                response = requests.delete(url, headers=headers, timeout=BINANCE_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
             else:
                 raise ValueError('지원하지 않는 HTTP method입니다.')
-        except requests.RequestException as exc:
-            last_error = exc
+        except requests.RequestException:
+            if method != "GET":
+                raise OrderExecutionUnknown("Binance 쓰기 요청 결과를 확인할 수 없습니다.") from None
             if attempt < BINANCE_MAX_RETRIES - 1:
                 time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
                 continue
-            raise HTTPException(status_code=503, detail=f'Binance 네트워크 요청 실패: {exc}')
+            raise HTTPException(status_code=503, detail='Binance 네트워크 요청 실패') from None
 
         data = _parse_response(response)
 
-        if response.status_code < 400:
+        if 200 <= response.status_code < 300 and data is not None:
             return data
 
-        if _is_retryable_response(response.status_code, data) and attempt < BINANCE_MAX_RETRIES - 1:
+        if method != "GET" and (
+            response.status_code == 408
+            or response.status_code < 400
+            or response.status_code >= 500
+            or _binance_error_code(data) in {-1006, -1007}
+        ):
+            raise OrderExecutionUnknown("Binance 쓰기 요청 결과가 불명확합니다.")
+        if 200 <= response.status_code < 300:
+            raise HTTPException(status_code=502, detail='Binance 응답 형식이 올바르지 않습니다.')
+        if method == "GET" and _is_retryable_response(response.status_code, data) and attempt < BINANCE_MAX_RETRIES - 1:
             time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
             continue
 
         _raise_binance_error(response, data)
 
-    raise HTTPException(status_code=503, detail=f'Binance 요청 재시도 실패: {last_error}')
+    raise HTTPException(status_code=503, detail='Binance 요청 재시도 실패') from None
 
 
 def binance_public_get(base_url: str, path: str, params: Optional[dict] = None):
     if params is None:
         params = {}
-
-    last_error = None
 
     for attempt in range(BINANCE_MAX_RETRIES):
         try:
@@ -128,37 +176,31 @@ def binance_public_get(base_url: str, path: str, params: Optional[dict] = None):
                 params=params,
                 timeout=BINANCE_REQUEST_TIMEOUT_SECONDS,
             )
-        except requests.RequestException as exc:
-            last_error = exc
+        except requests.RequestException:
             if attempt < BINANCE_MAX_RETRIES - 1:
                 time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
                 continue
-            raise HTTPException(status_code=503, detail=f'Binance Public API 네트워크 요청 실패: {exc}')
+            raise HTTPException(status_code=503, detail='Binance Public API 네트워크 요청 실패') from None
 
         data = _parse_response(response)
-        if response.status_code < 400:
+        if 200 <= response.status_code < 300:
+            if data is None:
+                raise HTTPException(status_code=502, detail='Binance 응답 형식이 올바르지 않습니다.')
             return data
 
         if _is_retryable_response(response.status_code, data) and attempt < BINANCE_MAX_RETRIES - 1:
             time.sleep(BINANCE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
             continue
 
-        raise HTTPException(
-            status_code=400,
-            detail={
-                'message': 'Binance Public API 요청 실패',
-                'binance_status': response.status_code,
-                'binance_response': data,
-            },
-        )
+        _raise_binance_error(response, data)
 
-    raise HTTPException(status_code=503, detail=f'Binance Public API 재시도 실패: {last_error}')
+    raise HTTPException(status_code=503, detail='Binance Public API 재시도 실패') from None
 
 
 def get_binance_server_time_ms() -> int:
     data = binance_public_get(
-        base_url=BINANCE_FUTURES_BASE_URL,
-        path='/fapi/v1/time',
+        base_url=BINANCE_SPOT_BASE_URL,
+        path='/api/v3/time',
         params={},
     )
     return int(data['serverTime'])
@@ -181,157 +223,10 @@ def check_binance_permissions(api_key: str, secret_key: str) -> dict:
     return binance_signed_request('GET', BINANCE_SPOT_BASE_URL, '/sapi/v1/account/apiRestrictions', api_key, secret_key)
 
 
-def get_futures_balance_raw(api_key: str, secret_key: str):
-    return binance_signed_request('GET', BINANCE_FUTURES_BASE_URL, '/fapi/v2/balance', api_key, secret_key)
-
-
-def get_futures_positions_raw(api_key: str, secret_key: str, symbol: Optional[str] = None):
-    params = {}
-    if symbol:
-        params['symbol'] = symbol.upper()
-    return binance_signed_request('GET', BINANCE_FUTURES_BASE_URL, '/fapi/v2/positionRisk', api_key, secret_key, params=params)
-
-
-def get_futures_open_orders_raw(api_key: str, secret_key: str, symbol: str):
-    return binance_signed_request('GET', BINANCE_FUTURES_BASE_URL, '/fapi/v1/openOrders', api_key, secret_key, params={'symbol': symbol.upper()})
-
-
-def cancel_futures_order_raw(api_key: str, secret_key: str, symbol: str, order_id: int):
-    return binance_signed_request('DELETE', BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', api_key, secret_key, params={'symbol': symbol.upper(), 'orderId': order_id})
-
-
-def cancel_all_futures_open_orders_raw(api_key: str, secret_key: str, symbol: str):
-    return binance_signed_request('DELETE', BINANCE_FUTURES_BASE_URL, '/fapi/v1/allOpenOrders', api_key, secret_key, params={'symbol': symbol.upper()})
-
-
-def get_futures_price(symbol: str) -> float:
-    data = binance_public_get(BINANCE_FUTURES_BASE_URL, '/fapi/v1/ticker/price', params={'symbol': symbol.upper()})
-    return float(data['price'])
-
-
-def get_futures_exchange_info():
-    return binance_public_get(BINANCE_FUTURES_BASE_URL, '/fapi/v1/exchangeInfo', params={})
-
-
-@lru_cache(maxsize=256)
-def get_symbol_filters(symbol: str) -> dict:
-    symbol = symbol.upper()
-    exchange_info = get_futures_exchange_info()
-    for item in exchange_info.get('symbols', []):
-        if item.get('symbol') == symbol:
-            filters = {f.get('filterType'): f for f in item.get('filters', [])}
-            lot_size = filters.get('LOT_SIZE', {})
-            price_filter = filters.get('PRICE_FILTER', {})
-            min_notional = filters.get('MIN_NOTIONAL', {})
-            return {
-                'symbol': symbol,
-                'quantity_precision': int(item.get('quantityPrecision', 3)),
-                'price_precision': int(item.get('pricePrecision', 2)),
-                'step_size': lot_size.get('stepSize', '0.001'),
-                'min_qty': lot_size.get('minQty', '0.001'),
-                'tick_size': price_filter.get('tickSize', '0.01'),
-                'min_price': price_filter.get('minPrice', '0.01'),
-                'min_notional': min_notional.get('notional', '5'),
-            }
-    raise HTTPException(status_code=400, detail=f'지원하지 않는 심볼입니다: {symbol}')
-
-
-def floor_to_step(value: float, step: str) -> float:
-    value_decimal = Decimal(str(value))
-    step_decimal = Decimal(str(step))
-    if step_decimal <= 0:
-        return float(value_decimal)
-    return float((value_decimal / step_decimal).to_integral_value(rounding=ROUND_DOWN) * step_decimal)
-
-
-def normalize_quantity(symbol: str, quantity: float) -> float:
-    filters = get_symbol_filters(symbol)
-    normalized = floor_to_step(quantity, filters['step_size'])
-    min_qty = float(filters['min_qty'])
-    if normalized < min_qty:
-        return 0.0
-    return normalized
-
-
-def normalize_price(symbol: str, price: float) -> float:
-    filters = get_symbol_filters(symbol)
-    normalized = floor_to_step(price, filters['tick_size'])
-    min_price = float(filters['min_price'])
-    if normalized < min_price:
-        return 0.0
-    return normalized
-
-
-def is_min_notional_ok(symbol: str, quantity: float, price: float) -> bool:
-    filters = get_symbol_filters(symbol)
-    return quantity * price >= float(filters['min_notional'])
-
-
-def get_futures_klines(symbol: str, interval: str = '1m', limit: int = 1500, start_time: int | None = None, end_time: int | None = None):
+def get_spot_klines(symbol: str, interval: str = '1m', limit: int = 1000, start_time: int | None = None, end_time: int | None = None):
     params = {'symbol': symbol.upper(), 'interval': interval, 'limit': limit}
     if start_time is not None:
         params['startTime'] = start_time
     if end_time is not None:
         params['endTime'] = end_time
-    return binance_public_get(BINANCE_FUTURES_BASE_URL, '/fapi/v1/klines', params=params)
-
-
-def get_futures_klines_as_df(symbol: str, interval: str = '1m', limit: int = 1500) -> pd.DataFrame:
-    data = get_futures_klines(symbol=symbol, interval=interval, limit=limit)
-    rows = []
-    for item in data:
-        rows.append({'timestamp': int(item[0]), 'open': float(item[1]), 'high': float(item[2]), 'low': float(item[3]), 'close': float(item[4]), 'volume': float(item[5])})
-    return pd.DataFrame(rows)
-
-
-def get_usdt_available_balance(api_key: str, secret_key: str) -> float:
-    balances = get_futures_balance_raw(api_key, secret_key)
-    for item in balances:
-        if item.get('asset') == 'USDT':
-            return float(item.get('availableBalance', '0'))
-    return 0.0
-
-
-def get_active_position(api_key: str, secret_key: str, symbol: str) -> Optional[dict]:
-    positions = get_futures_positions_raw(api_key, secret_key, symbol=symbol)
-    if isinstance(positions, dict):
-        positions = [positions]
-    for position in positions:
-        if abs(float(position.get('positionAmt', '0'))) > 0:
-            return position
-    return None
-
-
-def calc_open_position_value_from_binance_position(position: Optional[dict]) -> float:
-    if not position:
-        return 0.0
-    position_amt = abs(float(position.get('positionAmt', '0')))
-    mark_price = float(position.get('markPrice', '0'))
-    return position_amt * mark_price
-
-
-def futures_set_leverage_raw(api_key: str, secret_key: str, symbol: str, leverage: int):
-    return binance_signed_request('POST', BINANCE_FUTURES_BASE_URL, '/fapi/v1/leverage', api_key, secret_key, params={'symbol': symbol.upper(), 'leverage': leverage})
-
-
-def futures_market_order_raw(api_key: str, secret_key: str, symbol: str, side: Literal['BUY', 'SELL'], quantity: float, reduce_only: bool = False, new_client_order_id: Optional[str] = None):
-    params = {'symbol': symbol.upper(), 'side': side, 'type': 'MARKET', 'quantity': quantity}
-    if reduce_only:
-        params['reduceOnly'] = 'true'
-    if new_client_order_id:
-        params['newClientOrderId'] = new_client_order_id
-    return binance_signed_request('POST', BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', api_key, secret_key, params=params)
-
-
-def futures_stop_market_order_raw(api_key: str, secret_key: str, symbol: str, side: Literal['BUY', 'SELL'], stop_price: float, new_client_order_id: Optional[str] = None):
-    params = {'symbol': symbol.upper(), 'side': side, 'type': 'STOP_MARKET', 'stopPrice': normalize_price(symbol, stop_price), 'closePosition': 'true', 'workingType': 'MARK_PRICE'}
-    if new_client_order_id:
-        params['newClientOrderId'] = new_client_order_id
-    return binance_signed_request('POST', BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', api_key, secret_key, params=params)
-
-
-def futures_take_profit_market_order_raw(api_key: str, secret_key: str, symbol: str, side: Literal['BUY', 'SELL'], stop_price: float, new_client_order_id: Optional[str] = None):
-    params = {'symbol': symbol.upper(), 'side': side, 'type': 'TAKE_PROFIT_MARKET', 'stopPrice': normalize_price(symbol, stop_price), 'closePosition': 'true', 'workingType': 'MARK_PRICE'}
-    if new_client_order_id:
-        params['newClientOrderId'] = new_client_order_id
-    return binance_signed_request('POST', BINANCE_FUTURES_BASE_URL, '/fapi/v1/order', api_key, secret_key, params=params)
+    return binance_public_get(BINANCE_SPOT_BASE_URL, '/api/v3/klines', params=params)

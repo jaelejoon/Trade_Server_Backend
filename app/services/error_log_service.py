@@ -2,6 +2,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.security import sanitize_sensitive_text
 from app.models.error_log import ErrorLog
 
 
@@ -19,8 +20,8 @@ def create_error_log(
         trading_account_id=trading_account_id,
         level=level,
         source=source,
-        message=message,
-        raw_data=raw_data,
+        message=sanitize_sensitive_text(message),
+        raw_data=sanitize_sensitive_text(raw_data) if raw_data else None,
     )
     db.add(log)
     db.commit()

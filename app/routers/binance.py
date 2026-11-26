@@ -1,27 +1,18 @@
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.config import BINANCE_TESTNET, DRY_RUN, ENABLE_LIVE_TRADING
+from app.core.config import BINANCE_TESTNET
 from app.core.jwt import get_current_user
-from app.core.security import encrypt_text
 from app.db.session import get_db
 from app.models.binance_api_key import BinanceApiKey
 from app.models.user import User
-from app.schemas import ApiKeyRegisterRequest, ApiKeyResponse, FuturesMarketOrderRequest, SetLeverageRequest
+from app.schemas import ApiKeyRegisterRequest, ApiKeyResponse
 from app.services.account_service import get_api_key_owned_by_user
-from app.services.binance_service import (
-    check_binance_permissions,
-    futures_market_order_raw,
-    futures_set_leverage_raw,
-    get_decrypted_api_keys,
-    get_futures_balance_raw,
-    get_futures_positions_raw,
-    get_futures_price,
-)
-from app.services.trade_log_service import create_trade_log
-
+from app.services.api_key_security_service import encrypt_api_credentials
+from app.services.binance_service import check_binance_permissions, get_decrypted_api_keys
+from app.services.spot_service import SpotExchange
 from app.models.trading_account import TradingAccount
 
 router = APIRouter(tags=["binance"])
@@ -33,15 +24,19 @@ def register_binance_api_key(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    api_key_encrypted, secret_key_encrypted = encrypt_api_credentials(
+        body.api_key,
+        body.secret_key,
+    )
+
     if BINANCE_TESTNET:
         item = BinanceApiKey(
             user_id=current_user.id,
-            api_key_encrypted=encrypt_text(body.api_key),
-            secret_key_encrypted=encrypt_text(body.secret_key),
+            api_key_encrypted=api_key_encrypted,
+            secret_key_encrypted=secret_key_encrypted,
             label=body.label,
             is_active=True,
             enable_reading=True,
-            enable_futures=True,
             enable_withdrawals=False,
             ip_restricted=False,
         )
@@ -52,12 +47,11 @@ def register_binance_api_key(
 
         item = BinanceApiKey(
             user_id=current_user.id,
-            api_key_encrypted=encrypt_text(body.api_key),
-            secret_key_encrypted=encrypt_text(body.secret_key),
+            api_key_encrypted=api_key_encrypted,
+            secret_key_encrypted=secret_key_encrypted,
             label=body.label,
             is_active=True,
             enable_reading=bool(permissions.get("enableReading", False)),
-            enable_futures=bool(permissions.get("enableFutures", False)),
             enable_withdrawals=bool(permissions.get("enableWithdrawals", False)),
             ip_restricted=bool(permissions.get("ipRestrict", False)),
         )
@@ -119,92 +113,11 @@ def delete_binance_api_key(
     }
 
 
-@router.get("/binance/futures/balance/{api_key_id}")
-def futures_balance(
+@router.get("/binance/spot/balance/{api_key_id}")
+def spot_balance(
     api_key_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     item = get_api_key_owned_by_user(db, current_user.id, api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
-    return get_futures_balance_raw(api_key, secret_key)
-
-
-@router.get("/binance/futures/positions/{api_key_id}")
-def futures_positions(
-    api_key_id: int,
-    symbol: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    item = get_api_key_owned_by_user(db, current_user.id, api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
-    return get_futures_positions_raw(api_key, secret_key, symbol=symbol)
-
-
-@router.get("/binance/futures/price/{symbol}")
-def futures_price(symbol: str):
-    return {"symbol": symbol.upper(), "price": get_futures_price(symbol)}
-
-
-@router.post("/binance/futures/set-leverage")
-def futures_set_leverage(
-    body: SetLeverageRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    item = get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
-    result = futures_set_leverage_raw(api_key, secret_key, body.symbol, body.leverage)
-    return {"status": "success", "result": result}
-
-
-@router.post("/binance/futures/order/market")
-def futures_market_order(
-    body: FuturesMarketOrderRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    item = get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
-    price = get_futures_price(body.symbol)
-
-    if DRY_RUN or not ENABLE_LIVE_TRADING:
-        result = {
-            "dry_run": True,
-            "symbol": body.symbol.upper(),
-            "side": body.side,
-            "quantity": body.quantity,
-            "reduce_only": body.reduce_only,
-        }
-    else:
-        result = futures_market_order_raw(
-            api_key=api_key,
-            secret_key=secret_key,
-            symbol=body.symbol,
-            side=body.side,
-            quantity=body.quantity,
-            reduce_only=body.reduce_only,
-        )
-
-    create_trade_log(
-        db=db,
-        user_id=current_user.id,
-        api_key_id=body.api_key_id,
-        trading_account_id=None,
-        symbol=body.symbol,
-        side=body.side,
-        order_type="MARKET",
-        qty=body.quantity,
-        price=price,
-        reduce_only=body.reduce_only,
-        dry_run=DRY_RUN,
-        status_value="DRY_RUN" if DRY_RUN else "SUBMITTED",
-        strategy=None,
-        signal_time=None,
-        stop_price=None,
-        take_profit_price=None,
-        raw_response=str(result),
-    )
-
-    return {"status": "success", "dry_run": DRY_RUN, "result": result}
+    return SpotExchange(*get_decrypted_api_keys(item)).account()["balances"]
