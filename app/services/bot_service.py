@@ -3,6 +3,7 @@ from decimal import Decimal
 from sqlalchemy import select, text
 
 from app.core.config import ENABLE_SPOT_TESTNET_ORDERS, SPOT_TESTNET_MAX_ORDER_USDT
+from app.models.bot_signal_state import BotSignalState
 from app.models.spot_fill import SpotFill
 from app.models.trading_account import TradingAccount
 from app.models.user import User
@@ -10,11 +11,17 @@ from app.services.account_service import get_api_key_owned_by_user, get_or_creat
 from app.services.binance_service import get_decrypted_api_keys
 from app.services.spot_lifecycle import SpotLifecycle
 from app.services.spot_service import SpotExchange
+from app.services.spot_v12_runtime import run_v12_tick
 
 TEST_ENTRY = "spot-testnet-check"
 
 
 def execute_bot_tick(db, account, *, recover_only=False, test_entry=None):
+    if test_entry is None and account.market_type == "SPOT" and account.is_running:
+        state = db.scalar(select(BotSignalState).where(BotSignalState.trading_account_id == account.id))
+        journal = (state.runtime_state or {}).get("spot", {}) if state else {}
+        if journal.get("signal_time") != TEST_ENTRY:
+            return run_v12_tick(db, account, recover_only=recover_only)
     if not ENABLE_SPOT_TESTNET_ORDERS or account.market_type != "SPOT":
         return {"status": "paused", "reason": "현물 테스트넷 주문 모드가 꺼져 있습니다."}
     account_id, key_id = account.id, account.api_key_id

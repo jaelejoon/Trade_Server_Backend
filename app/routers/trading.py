@@ -1,4 +1,4 @@
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,6 +25,7 @@ from app.services.binance_service import get_decrypted_api_keys
 from app.services.bot_service import execute_bot_tick
 
 from app.services.spot_service import SpotExchange
+from app.services.spot_v12_runtime import strategy_status
 from app.services.spot_recovery_service import inspect_recovery
 from app.services.error_log_service import create_error_log
 
@@ -394,6 +395,18 @@ def get_bot_oco(
                     if stop.get("origQty") == target.get("origQty"):
                         oco["quantity"] = stop.get("origQty")
     return {"trading_account_id": account.id, "oco": oco}
+
+
+@router.get("/trading/accounts/{trading_account_id}/strategy")
+def get_spot_strategy(
+    trading_account_id: int,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    result = strategy_status(db, trading_account_id, datetime.now(timezone.utc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="현물 계정을 찾을 수 없습니다.")
+    return result
 
 
 @router.get("/trading/logs")
