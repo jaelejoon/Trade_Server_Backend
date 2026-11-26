@@ -1,0 +1,76 @@
+{
+  "script_sha256": "98a10803d7ebc62f09b0934a2b39da59c387702197200070d3a6c787db2229af",
+  "selected": "V12",
+  "ranking": [
+    {
+      "candidate": "V12",
+      "hits": 17,
+      "min": 2.994751271602256,
+      "median": 3.2940985598253794,
+      "eligible": true
+    },
+    {
+      "candidate": "T12",
+      "hits": 17,
+      "min": 2.85187665347674,
+      "median": 2.9907534595127565,
+      "eligible": true
+    },
+    {
+      "candidate": "D60",
+      "hits": 17,
+      "min": 2.8145795943067182,
+      "median": 4.113452122599477,
+      "eligible": true
+    },
+    {
+      "candidate": "T6",
+      "hits": 17,
+      "min": 2.792961748930736,
+      "median": 4.47300581643902,
+      "eligible": true
+    },
+    {
+      "candidate": "M12",
+      "hits": 17,
+      "min": 2.7819284879037123,
+      "median": 3.0600026014187036,
+      "eligible": true
+    },
+    {
+      "candidate": "M6",
+      "hits": 17,
+      "min": 2.732447908409294,
+      "median": 5.0257950654920425,
+      "eligible": true
+    },
+    {
+      "candidate": "D40",
+      "hits": 17,
+      "min": 2.56346928191562,
+      "median": 3.560711652182469,
+      "eligible": true
+    },
+    {
+      "candidate": "V6",
+      "hits": 17,
+      "min": 2.278652381303062,
+      "median": 2.71747908900685,
+      "eligible": true
+    },
+    {
+      "candidate": "R75",
+      "hits": 16,
+      "min": 1.7230410286370785,
+      "median": 3.972519871190247,
+      "eligible": false
+    },
+    {
+      "candidate": "R90",
+      "hits": 16,
+      "min": 1.4365361290354366,
+      "median": 3.9645485309381305,
+      "eligible": false
+    }
+  ]
+}
