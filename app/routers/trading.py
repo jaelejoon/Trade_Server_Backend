@@ -1,14 +1,17 @@
+from datetime import timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import CANDLE_WARMUP_DAYS, ENABLE_TRADING_SCHEDULER
 from app.core.jwt import get_current_user
 from app.core.trading_limits import normalize_trading_symbol
 from app.db.session import get_db
+from app.models.bot_signal_state import BotSignalState
 from app.models.error_log import ErrorLog
+from app.models.spot_fill import SpotFill
 from app.models.trade_log import TradeLog
 from app.models.trading_account import TradingAccount
 from app.models.user import User
@@ -79,6 +82,32 @@ def list_trading_accounts(
     )
 
 
+def _spot_journal(db, account_id):
+    state = db.query(BotSignalState).filter_by(trading_account_id=account_id).one_or_none()
+    journal = (state.runtime_state or {}).get("spot") if state else None
+    return journal if isinstance(journal, dict) else {}
+
+
+def _stored_stop(db, account):
+    if account.is_running:
+        return None, None
+    clauses = [and_(ErrorLog.source == "spot_recovery",
+                    ErrorLog.message == "봇 체결 기록 확인 필요")]
+    if _spot_journal(db, account.id).get("halted") is True:
+        clauses.append(and_(ErrorLog.source == "spot_lifecycle",
+                            ErrorLog.message != "거래소 잔고와 봇 보유량 불일치"))
+    log = (db.query(ErrorLog)
+           .filter(ErrorLog.trading_account_id == account.id, ErrorLog.user_id == account.user_id,
+                   or_(*clauses))
+           .order_by(ErrorLog.id.desc()).first())
+    if log is None:
+        return None, None
+    stopped_at = log.created_at
+    if stopped_at is not None and stopped_at.tzinfo is None:
+        stopped_at = stopped_at.replace(tzinfo=timezone.utc)
+    return log.message, stopped_at
+
+
 @router.get("/trading/status")
 def trading_status(
     db: Session = Depends(get_db),
@@ -137,6 +166,7 @@ def trading_status(
             .first()
         )
 
+        stop_reason, stopped_at = _stored_stop(db, account)
         account_items.append(
             {
                 "id": account.id,
@@ -147,6 +177,8 @@ def trading_status(
                 "max_daily_loss_ratio": account.max_daily_loss_ratio,
                 "dry_run": account.dry_run,
                 "is_running": account.is_running,
+                "stop_reason": stop_reason,
+                "stopped_at": stopped_at,
                 "is_active": account.is_active,
                 "created_at": account.created_at,
                 "latest_log": serialize_trade_log(account_latest_log),
@@ -155,6 +187,7 @@ def trading_status(
 
     return {
         "status": "ok",
+        "scheduler_enabled": ENABLE_TRADING_SCHEDULER,
         "dry_run": all(account.dry_run for account in accounts) if accounts else current_user.dry_run,
         "is_live_trading": any(is_account_live_trading_enabled(db, account) for account in accounts),
         "enable_live_trading": current_user.enable_live_trading,
@@ -280,6 +313,70 @@ def get_trading_account_portfolio(
 
     balances = SpotExchange(api_key, secret_key).account()["balances"]
     return {"status": "ok", "symbol": account.symbol, "balances": balances}
+
+
+@router.get("/trading/accounts/{trading_account_id}/fills")
+def get_spot_fills(
+    trading_account_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    before_trade_id: int | None = Query(None, gt=0, le=9223372036854775807),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
+    query = db.query(SpotFill).filter(SpotFill.trading_account_id == account.id)
+    if before_trade_id is not None:
+        query = query.filter(SpotFill.trade_id < before_trade_id)
+    rows = query.order_by(SpotFill.trade_id.desc()).limit(limit + 1).all()
+    items = [
+        {"trade_id": str(row.trade_id), "order_id": str(row.order_id), "side": row.side,
+         "quantity": format(row.quantity, "f"), "commission": format(row.commission, "f"),
+         "commission_asset": row.commission_asset}
+        for row in rows[:limit]
+    ]
+    return {"trading_account_id": account.id, "symbol": account.symbol, "items": items,
+            "next_before_trade_id": items[-1]["trade_id"] if len(rows) > limit else None}
+
+
+@router.get("/trading/accounts/{trading_account_id}/oco")
+def get_bot_oco(
+    trading_account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
+    journal = _spot_journal(db, account.id)
+    client_id = journal.get("oco")
+    if not isinstance(client_id, str) or not client_id:
+        return {"trading_account_id": account.id, "oco": None}
+
+    item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
+    exchange = SpotExchange(*get_decrypted_api_keys(item))
+    oco = {"source": "bot_journal", "client_order_list_id": client_id,
+           "order_list_id": None, "stop_price": journal.get("stop"),
+           "take_profit_price": journal.get("target"), "quantity": None, "status": "UNKNOWN"}
+    order_list = exchange.lookup(client_id, order_list=True)
+    if (order_list and order_list.get("symbol") == account.symbol
+            and order_list.get("listClientOrderId") == client_id
+            and type(order_list.get("orderListId")) is int):
+        list_id = order_list["orderListId"]
+        oco["order_list_id"] = str(list_id)
+        oco["status"] = order_list.get("listOrderStatus") or "UNKNOWN"
+        legs = order_list.get("orders") or []
+        if len(legs) == 2:
+            orders = [exchange.lookup(leg["clientOrderId"]) for leg in legs]
+            if all(order and order.get("orderListId") == list_id
+                   and order.get("symbol") == account.symbol and order.get("side") == "SELL"
+                   for order in orders):
+                by_type = {order["type"]: order for order in orders}
+                stop = by_type.get("STOP_LOSS")
+                target = by_type.get("LIMIT_MAKER")
+                if stop and target:
+                    oco["stop_price"] = stop.get("stopPrice") or oco["stop_price"]
+                    oco["take_profit_price"] = target.get("price") or oco["take_profit_price"]
+                    if stop.get("origQty") == target.get("origQty"):
+                        oco["quantity"] = stop.get("origQty")
+    return {"trading_account_id": account.id, "oco": oco}
 
 
 @router.get("/trading/logs")
