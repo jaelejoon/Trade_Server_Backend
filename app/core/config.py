@@ -132,7 +132,10 @@ BINANCE_FUTURES_BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", _expected_futur
 if BINANCE_FUTURES_BASE_URL != _expected_futures_url:
     raise RuntimeError("Binance 선물 URL이 선택한 거래 환경과 일치하지 않습니다.")
 
-BINANCE_SPOT_BASE_URL = os.getenv("BINANCE_SPOT_BASE_URL", "https://api.binance.com")
+_expected_spot_url = "https://testnet.binance.vision" if BINANCE_TESTNET else "https://api.binance.com"
+BINANCE_SPOT_BASE_URL = os.getenv("BINANCE_SPOT_BASE_URL", _expected_spot_url).rstrip("/")
+if BINANCE_SPOT_BASE_URL != _expected_spot_url:
+    raise RuntimeError("Binance 현물 URL이 선택한 거래 환경과 일치하지 않습니다.")
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"

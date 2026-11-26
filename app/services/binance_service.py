@@ -85,25 +85,40 @@ def binance_signed_request(
     secret_key: str,
     params: Optional[dict] = None,
 ):
-    if method in {'POST', 'DELETE'} and (
-        DRY_RUN or not ENABLE_LIVE_TRADING or base_url != BINANCE_FUTURES_BASE_URL
-        or (BINANCE_TESTNET and path == '/fapi/v1/leverage')
-    ):
-        raise HTTPException(status_code=403, detail='현재 모드에서는 Binance 쓰기 요청이 허용되지 않습니다.')
-    if params is None:
-        params = {}
-    if method == 'POST' and path not in {'/fapi/v1/order', '/fapi/v1/algoOrder', '/fapi/v1/leverage'}:
-        raise HTTPException(status_code=403, detail='지원하지 않는 Binance 쓰기 경로입니다.')
-    if method == 'POST' or (method == 'DELETE' and path != '/fapi/v1/algoOrder'):
-        try:
-            symbol = normalize_trading_symbol(params.get('symbol'))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        params = {**params, 'symbol': symbol}
-    if method == 'POST' and path == '/fapi/v1/leverage':
-        leverage = params.get('leverage')
-        if type(leverage) is not int or not is_allowed_leverage(leverage):
-            raise HTTPException(status_code=400, detail=LEVERAGE_LIMIT_MESSAGE)
+    if path.startswith('/api/v3/'):
+        if base_url != BINANCE_SPOT_BASE_URL:
+            raise HTTPException(status_code=403, detail='현물 연결 주소가 올바르지 않습니다.')
+        allowed = {
+            'GET': {'/api/v3/account', '/api/v3/order', '/api/v3/orderList', '/api/v3/openOrderList'},
+            'POST': {'/api/v3/order', '/api/v3/orderList/oco'},
+        }
+        if path not in allowed.get(method, set()) or (
+            method != 'GET' and (DRY_RUN or not ENABLE_LIVE_TRADING)
+        ):
+            raise HTTPException(status_code=403, detail='현물 요청이 허용되지 않습니다.')
+        params = params or {}
+        if method == 'POST' and params.get('symbol') != 'BTCUSDT':
+            raise HTTPException(status_code=400, detail='BTCUSDT만 주문할 수 있습니다.')
+    else:
+        if method in {'POST', 'DELETE'} and (
+            DRY_RUN or not ENABLE_LIVE_TRADING or base_url != BINANCE_FUTURES_BASE_URL
+            or (BINANCE_TESTNET and path == '/fapi/v1/leverage')
+        ):
+            raise HTTPException(status_code=403, detail='현재 모드에서는 Binance 쓰기 요청이 허용되지 않습니다.')
+        if params is None:
+            params = {}
+        if method == 'POST' and path not in {'/fapi/v1/order', '/fapi/v1/algoOrder', '/fapi/v1/leverage'}:
+            raise HTTPException(status_code=403, detail='지원하지 않는 Binance 쓰기 경로입니다.')
+        if method == 'POST' or (method == 'DELETE' and path != '/fapi/v1/algoOrder'):
+            try:
+                symbol = normalize_trading_symbol(params.get('symbol'))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            params = {**params, 'symbol': symbol}
+        if method == 'POST' and path == '/fapi/v1/leverage':
+            leverage = params.get('leverage')
+            if type(leverage) is not int or not is_allowed_leverage(leverage):
+                raise HTTPException(status_code=400, detail=LEVERAGE_LIMIT_MESSAGE)
 
     for attempt in range(BINANCE_MAX_RETRIES):
         request_params = dict(params)
