@@ -18,62 +18,14 @@ from app.scheduler.bot_scheduler import start_account_job, stop_account_job
 from app.services.account_service import get_active_trading_account_owned_by_user, get_api_key_owned_by_user, get_trading_account_owned_by_user
 from app.services.binance_candle_sync import BinanceCandleSyncService
 from app.core.security import sanitize_sensitive_text
-from app.services.binance_service import get_decrypted_api_keys, get_futures_balance_raw, get_futures_positions_raw
-from app.services.bot_service import execute_bot_tick, is_account_live_trading_enabled, reconcile_position_and_open_orders
+from app.services.binance_service import get_decrypted_api_keys
+from app.services.bot_service import execute_bot_tick
+
+from app.services.spot_service import SpotExchange
 
 router = APIRouter(tags=["trading"])
 
 
-
-def _to_float(value, default: float = 0.0) -> float:
-    try:
-        if value is None or value == '':
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_futures_balance_item(item: dict) -> dict:
-    return {
-        'asset': item.get('asset'),
-        'balance': _to_float(item.get('balance')),
-        'available_balance': _to_float(item.get('availableBalance')),
-        'cross_wallet_balance': _to_float(item.get('crossWalletBalance')),
-        'cross_unrealized_pnl': _to_float(item.get('crossUnPnl')),
-        'max_withdraw_amount': _to_float(item.get('maxWithdrawAmount')),
-    }
-
-
-def _parse_futures_position_item(item: dict) -> dict | None:
-    position_amt = _to_float(item.get('positionAmt'))
-
-    if abs(position_amt) <= 0:
-        return None
-
-    entry_price = _to_float(item.get('entryPrice'))
-    mark_price = _to_float(item.get('markPrice'))
-    unrealized_pnl = _to_float(item.get('unRealizedProfit'))
-    notional = _to_float(item.get('notional'))
-    isolated_wallet = _to_float(item.get('isolatedWallet'))
-    initial_margin = abs(notional) / _to_float(item.get('leverage'), 1.0) if _to_float(item.get('leverage'), 0.0) > 0 else isolated_wallet
-    pnl_base = abs(initial_margin) if abs(initial_margin) > 0 else abs(notional)
-    pnl_rate = unrealized_pnl / pnl_base * 100 if pnl_base > 0 else 0.0
-
-    return {
-        'symbol': item.get('symbol'),
-        'position_side': 'LONG' if position_amt > 0 else 'SHORT',
-        'position_amt': position_amt,
-        'entry_price': entry_price,
-        'mark_price': mark_price,
-        'notional': notional,
-        'unrealized_pnl': unrealized_pnl,
-        'pnl_rate': pnl_rate,
-        'leverage': _to_float(item.get('leverage')),
-        'liquidation_price': _to_float(item.get('liquidationPrice')),
-        'margin_type': item.get('marginType'),
-        'isolated_wallet': isolated_wallet,
-    }
 
 def ensure_active_trading_account(account: TradingAccount):
     if not account.is_active:
@@ -95,7 +47,6 @@ def create_trading_account(
         user_id=current_user.id,
         api_key_id=body.api_key_id,
         symbol=body.symbol.upper(),
-        leverage=body.leverage,
         max_risk_ratio=body.max_risk_ratio,
         max_daily_loss_ratio=body.max_daily_loss_ratio,
         dry_run=current_user.dry_run,
@@ -190,7 +141,6 @@ def trading_status(
                 "api_key_id": account.api_key_id,
                 "market_type": account.market_type,
                 "symbol": account.symbol,
-                "leverage": account.leverage,
                 "max_risk_ratio": account.max_risk_ratio,
                 "max_daily_loss_ratio": account.max_daily_loss_ratio,
                 "dry_run": account.dry_run,
@@ -238,6 +188,8 @@ def start_trading_account(
         symbol = normalize_trading_symbol(account.symbol)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    if account.market_type != "SPOT":
+        raise HTTPException(status_code=409, detail="현물 계정을 새로 등록하세요.")
     sync_result = BinanceCandleSyncService.warmup_historical_1m_candles(
         db=db,
         user_id=current_user.id,
@@ -301,13 +253,8 @@ def reconcile_trading_account(
     api_key_item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
     api_key, secret_key = get_decrypted_api_keys(api_key_item)
 
-    return reconcile_position_and_open_orders(
-        api_key=api_key,
-        secret_key=secret_key,
-        symbol=account.symbol,
-        account_dry_run=account.dry_run,
-        live_trading_enabled=is_account_live_trading_enabled(db, account),
-    )
+    exchange = SpotExchange(api_key, secret_key)
+    return {"balances": exchange.account()["balances"], "open_order_lists": exchange.open_order_lists()}
 
 
 @router.get('/trading/accounts/{trading_account_id}/portfolio')
@@ -320,40 +267,8 @@ def get_trading_account_portfolio(
     api_key_item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
     api_key, secret_key = get_decrypted_api_keys(api_key_item)
 
-    raw_balances = get_futures_balance_raw(api_key, secret_key)
-    raw_positions = get_futures_positions_raw(api_key, secret_key, symbol=account.symbol)
-
-    if isinstance(raw_positions, dict):
-        raw_positions = [raw_positions]
-
-    balances = [_parse_futures_balance_item(item) for item in raw_balances if isinstance(item, dict)]
-    positions = [parsed for item in raw_positions if isinstance(item, dict) for parsed in [_parse_futures_position_item(item)] if parsed]
-
-    usdt_balance = next((item for item in balances if item.get('asset') == 'USDT'), None)
-    wallet_balance = usdt_balance['balance'] if usdt_balance else 0.0
-    available_balance = usdt_balance['available_balance'] if usdt_balance else 0.0
-    unrealized_pnl = sum(position['unrealized_pnl'] for position in positions)
-    estimated_equity = wallet_balance + unrealized_pnl
-    pnl_rate = unrealized_pnl / wallet_balance * 100 if wallet_balance > 0 else 0.0
-
-    return {
-        'status': 'ok',
-        'dry_run': account.dry_run,
-        'trading_account_id': account.id,
-        'api_key_id': account.api_key_id,
-        'symbol': account.symbol,
-        'summary': {
-            'asset': 'USDT',
-            'wallet_balance': wallet_balance,
-            'available_balance': available_balance,
-            'estimated_equity': estimated_equity,
-            'unrealized_pnl': unrealized_pnl,
-            'pnl_rate': pnl_rate,
-            'position_count': len(positions),
-        },
-        'balances': balances,
-        'positions': positions,
-    }
+    balances = SpotExchange(api_key, secret_key).account()["balances"]
+    return {"status": "ok", "symbol": account.symbol, "balances": balances}
 
 
 @router.get("/trading/logs")

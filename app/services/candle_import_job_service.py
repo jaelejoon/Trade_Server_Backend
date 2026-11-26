@@ -13,7 +13,7 @@ from app.core.config import (
 )
 from app.db.session import SessionLocal
 from app.models.candle_import_job import CandleImportJob
-from app.services.binance_service import get_futures_klines
+from app.services.binance_service import get_spot_klines
 from app.services.candle_service import CandleService
 
 _IMPORT_LOCK = threading.Lock()
@@ -154,14 +154,14 @@ class CandleImportJobService:
                 symbol = job.symbol
 
                 while current < end_time:
-                    batch_end = min(current + timedelta(minutes=1500), end_time)
+                    batch_end = min(current + timedelta(minutes=1000), end_time)
 
-                    klines = get_futures_klines(
+                    klines = get_spot_klines(
                         symbol=symbol,
                         interval="1m",
                         start_time=int(current.timestamp() * 1000),
                         end_time=int(batch_end.timestamp() * 1000),
-                        limit=1500,
+                        limit=1000,
                     )
 
                     job = db.query(CandleImportJob).filter(CandleImportJob.id == job_id).first()

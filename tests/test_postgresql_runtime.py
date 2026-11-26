@@ -54,7 +54,7 @@ def test_runtime_state_round_trip_and_migration(monkeypatch):
                 text("SELECT user_id, status FROM backtest_runs WHERE id = :id"), {"id": run_id},
             ).one() == (9001, 'succeeded')
             connection.execute(text("""
-                INSERT INTO candles_1m (user_id, symbol, open_time, open, high, low, close, volume)
+                INSERT INTO spot_candles_1m (user_id, symbol, open_time, open, high, low, close, volume)
                 SELECT 9001, 'BTCUSDT', candle_time, 100, 100, 100, 100, 1
                 FROM generate_series(timestamp '2026-01-01' - interval '800 hours',
                                      timestamp '2026-01-01 00:01', interval '1 minute') AS candle_time

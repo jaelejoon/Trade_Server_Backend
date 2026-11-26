@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, EmailStr, Field
 
-from app.core.trading_limits import MAX_LEVERAGE, TRADING_SYMBOL, normalize_trading_symbol
+from app.core.trading_limits import TRADING_SYMBOL, normalize_trading_symbol
 
 
 TradingSymbol = Annotated[str, AfterValidator(normalize_trading_symbol)]
@@ -50,7 +50,6 @@ class ApiKeyResponse(BaseModel):
     masked_api_key: str
     is_active: bool
     enable_reading: bool
-    enable_futures: bool
     enable_withdrawals: bool
     ip_restricted: bool
     created_at: datetime
@@ -61,7 +60,6 @@ class ApiKeyResponse(BaseModel):
 class TradingAccountCreateRequest(BaseModel):
     api_key_id: int
     symbol: TradingSymbol = TRADING_SYMBOL
-    leverage: int = Field(default=MAX_LEVERAGE, ge=1, le=MAX_LEVERAGE)
     max_risk_ratio: float = Field(default=0.03, gt=0, le=0.2)
     max_daily_loss_ratio: float = Field(default=0.03, gt=0, le=0.2)
 
@@ -71,7 +69,6 @@ class TradingAccountResponse(BaseModel):
     api_key_id: int
     market_type: str
     symbol: str
-    leverage: int
     max_risk_ratio: float
     max_daily_loss_ratio: float
     dry_run: bool
@@ -79,20 +76,6 @@ class TradingAccountResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
-
-
-class FuturesMarketOrderRequest(BaseModel):
-    api_key_id: int
-    symbol: TradingSymbol = TRADING_SYMBOL
-    side: Literal["BUY", "SELL"]
-    quantity: float = Field(gt=0)
-    reduce_only: bool = False
-
-
-class SetLeverageRequest(BaseModel):
-    api_key_id: int
-    symbol: TradingSymbol = TRADING_SYMBOL
-    leverage: int = Field(ge=1, le=MAX_LEVERAGE)
 
 
 class BotTickRequest(BaseModel):

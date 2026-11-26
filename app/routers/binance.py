@@ -1,26 +1,18 @@
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.config import BINANCE_TESTNET, DRY_RUN, ENABLE_LIVE_TRADING
+from app.core.config import BINANCE_TESTNET
 from app.core.jwt import get_current_user
 from app.db.session import get_db
 from app.models.binance_api_key import BinanceApiKey
 from app.models.user import User
-from app.schemas import ApiKeyRegisterRequest, ApiKeyResponse, FuturesMarketOrderRequest, SetLeverageRequest
+from app.schemas import ApiKeyRegisterRequest, ApiKeyResponse
 from app.services.account_service import get_api_key_owned_by_user
 from app.services.api_key_security_service import encrypt_api_credentials
-from app.services.binance_service import (
-    check_binance_permissions,
-    futures_set_leverage_raw,
-    get_decrypted_api_keys,
-    get_futures_balance_raw,
-    get_futures_positions_raw,
-    get_futures_price,
-)
-from app.services.trade_log_service import create_trade_log
-
+from app.services.binance_service import check_binance_permissions, get_decrypted_api_keys
+from app.services.spot_service import SpotExchange
 from app.models.trading_account import TradingAccount
 
 router = APIRouter(tags=["binance"])
@@ -45,7 +37,6 @@ def register_binance_api_key(
             label=body.label,
             is_active=True,
             enable_reading=True,
-            enable_futures=True,
             enable_withdrawals=False,
             ip_restricted=False,
         )
@@ -61,7 +52,6 @@ def register_binance_api_key(
             label=body.label,
             is_active=True,
             enable_reading=bool(permissions.get("enableReading", False)),
-            enable_futures=bool(permissions.get("enableFutures", False)),
             enable_withdrawals=bool(permissions.get("enableWithdrawals", False)),
             ip_restricted=bool(permissions.get("ipRestrict", False)),
         )
@@ -123,93 +113,11 @@ def delete_binance_api_key(
     }
 
 
-@router.get("/binance/futures/balance/{api_key_id}")
-def futures_balance(
+@router.get("/binance/spot/balance/{api_key_id}")
+def spot_balance(
     api_key_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     item = get_api_key_owned_by_user(db, current_user.id, api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
-    return get_futures_balance_raw(api_key, secret_key)
-
-
-@router.get("/binance/futures/positions/{api_key_id}")
-def futures_positions(
-    api_key_id: int,
-    symbol: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    item = get_api_key_owned_by_user(db, current_user.id, api_key_id)
-    api_key, secret_key = get_decrypted_api_keys(item)
-    return get_futures_positions_raw(api_key, secret_key, symbol=symbol)
-
-
-@router.get("/binance/futures/price/{symbol}")
-def futures_price(symbol: str):
-    return {"symbol": symbol.upper(), "price": get_futures_price(symbol)}
-
-
-@router.post("/binance/futures/set-leverage")
-def futures_set_leverage(
-    body: SetLeverageRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    if BINANCE_TESTNET or DRY_RUN or not ENABLE_LIVE_TRADING or current_user.dry_run or not current_user.enable_live_trading:
-        raise HTTPException(status_code=403, detail="현재 모드에서는 레버리지를 변경할 수 없습니다.")
-
-    item = get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
-    accounts = db.query(TradingAccount).filter(
-        TradingAccount.user_id == current_user.id,
-        TradingAccount.api_key_id == body.api_key_id,
-        TradingAccount.symbol == body.symbol.upper(),
-        TradingAccount.is_active.is_(True),
-    ).all()
-    if not accounts or any(account.dry_run or account.is_running for account in accounts):
-        raise HTTPException(status_code=403, detail="해당 계정의 레버리지를 변경할 수 없습니다.")
-
-    api_key, secret_key = get_decrypted_api_keys(item)
-    result = futures_set_leverage_raw(api_key, secret_key, body.symbol, body.leverage)
-    return {"status": "success", "result": result}
-
-
-@router.post("/binance/futures/order/market")
-def futures_market_order(
-    body: FuturesMarketOrderRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # 이 요청에는 거래 계정 ID가 없어 계정별 주문 허용 여부를 확인할 수 없다.
-    get_api_key_owned_by_user(db, current_user.id, body.api_key_id)
-    price = get_futures_price(body.symbol)
-    result = {
-        "dry_run": True,
-        "symbol": body.symbol.upper(),
-        "side": body.side,
-        "quantity": body.quantity,
-        "reduce_only": body.reduce_only,
-    }
-
-    create_trade_log(
-        db=db,
-        user_id=current_user.id,
-        api_key_id=body.api_key_id,
-        trading_account_id=None,
-        symbol=body.symbol,
-        side=body.side,
-        order_type="MARKET",
-        qty=body.quantity,
-        price=price,
-        reduce_only=body.reduce_only,
-        dry_run=True,
-        status_value="DRY_RUN",
-        strategy=None,
-        signal_time=None,
-        stop_price=None,
-        take_profit_price=None,
-        raw_response=str(result),
-    )
-
-    return {"status": "success", "dry_run": True, "result": result}
+    return SpotExchange(*get_decrypted_api_keys(item)).account()["balances"]

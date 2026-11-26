@@ -19,7 +19,7 @@ def bot_tick_job(trading_account_id: int):
     db = SessionLocal()
     try:
         account = db.query(TradingAccount).filter(TradingAccount.id == trading_account_id).first()
-        if not account or not account.is_running:
+        if not account or not account.is_running or account.market_type != "SPOT":
             return
         execute_bot_tick(db=db, account=account)
     except Exception:
@@ -68,7 +68,7 @@ def recover_running_account_jobs():
     db = SessionLocal()
     recovered = 0
     try:
-        accounts = db.query(TradingAccount).filter(TradingAccount.is_running == True).all()
+        accounts = db.query(TradingAccount).filter(TradingAccount.is_running == True, TradingAccount.market_type == "SPOT").all()
         for account in accounts:
             start_account_job(account.id)
             recovered += 1

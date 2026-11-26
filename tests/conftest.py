@@ -19,7 +19,6 @@ os.environ['DRY_RUN'] = 'true'
 os.environ['ENABLE_LIVE_TRADING'] = 'false'
 
 os.environ['BINANCE_TESTNET'] = 'true'
-os.environ.pop('BINANCE_FUTURES_BASE_URL', None)
 os.environ.pop('BINANCE_SPOT_BASE_URL', None)
 
 

@@ -41,10 +41,10 @@ class RunRequest(BaseModel):
     start: AwareDatetime
     end: AwareDatetime
     initial_equity_usdt: float = Field(ge=0.01, le=1_000_000_000)
-    leverage: int = Field(default=1, strict=True, ge=1, le=1)
+    leverage: int = Field(default=1, strict=True, ge=1, le=1)  # 현물 API는 1배와 펀딩 0만 허용한다.
     fee_bps: float = Field(default=5, ge=0, le=100)
     slippage_bps: float = Field(default=0, ge=0, le=100)
-    funding: Literal["disabled"] = "disabled"
+    funding: Literal["disabled"] = "disabled"  # 현물 API는 1배와 펀딩 0만 허용한다.
 
     @field_validator("start", "end", mode="before")
     @classmethod
@@ -97,7 +97,7 @@ def simulate(db, user_id, body):
     else:
         result = replay(
             candles.loc[start:], strategy.signals(candles), body.initial_equity_usdt,
-            body.leverage, body.fee_bps, body.slippage_bps, {},
+            body.leverage, body.fee_bps, body.slippage_bps, {},  # 현물 API는 1배와 펀딩 0만 허용한다.
             loss_limits=strategy.loss_limits,
         )
     return {
@@ -107,7 +107,7 @@ def simulate(db, user_id, body):
                             else "next_open_1m_stop_first_fixed_maintenance"),
         "candle_count": len(candles),
         "candle_sha256": candle_checksum(candles),
-        "funding": {
+        "funding": {  # 현물 API는 1배와 펀딩 0만 허용한다.
             "status": "disabled",
             "label": "미반영",
             "record_count": 0,

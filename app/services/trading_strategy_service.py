@@ -4,7 +4,6 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.trading_limits import LEVERAGE_LIMIT_MESSAGE, MAX_LEVERAGE, is_allowed_leverage
 from app.models.trading_strategy import StrategySettingHistory, TradingStrategy, UserStrategySetting
 from app.models.trading_account import TradingAccount
 from app.strategy.strategy_v57 import DEFAULT_V57_CONFIG
@@ -22,15 +21,15 @@ V57_EDITABLE_FIELDS = [
     "B_MAX_POS_STRONG",
     "B_MAX_POS_NORMAL",
     "B_MAX_HOLD_BARS",
-    "S_RSI_MIN",
-    "S_RSI_MAX",
-    "S_ATR_PCT_MIN",
-    "S_BB_WIDTH_MIN",
-    "S_STOP_ATR_MULT",
-    "S_TAKE_PROFIT_R",
-    "S_RISK",
-    "S_MAX_POS",
-    "S_MAX_HOLD_BARS",
+
+
+
+
+
+
+
+
+
     "ENABLE_BAD_HOUR_FILTER",
     "BAD_ENTRY_HOURS_1H",
     "ENABLE_EVENT_FILTER",
@@ -43,24 +42,24 @@ V57_EDITABLE_FIELDS = [
 NUMERIC_RANGES = {
     "B_RSI_MIN": (0, 100),
     "B_RSI_MAX": (0, 100),
-    "S_RSI_MIN": (0, 100),
-    "S_RSI_MAX": (0, 100),
+
+
     "B_ATR_PCT_MIN": (0, 1),
     "B_BB_WIDTH_MIN": (0, 1),
-    "S_ATR_PCT_MIN": (0, 1),
-    "S_BB_WIDTH_MIN": (0, 1),
+
+
     "B_STOP_ATR_MULT": (0.1, 10),
-    "S_STOP_ATR_MULT": (0.1, 10),
+
     "B_TAKE_PROFIT_R": (0.1, 50),
-    "S_TAKE_PROFIT_R": (0.1, 50),
+
     "B_RISK_STRONG": (0, 0.2),
     "B_RISK_NORMAL": (0, 0.2),
-    "S_RISK": (0, 0.2),
+
     "B_MAX_POS_STRONG": (0, 2),
     "B_MAX_POS_NORMAL": (0, 2),
-    "S_MAX_POS": (0, 2),
+
     "B_MAX_HOLD_BARS": (1, 1000),
-    "S_MAX_HOLD_BARS": (1, 1000),
+
     "EVENT_RISK_REDUCTION_MULT": (0, 1),
 }
 
@@ -85,8 +84,8 @@ BUILTIN_STRATEGY_DEFINITIONS = [
             "B_RISK_NORMAL": 0.018,
             "B_MAX_POS_STRONG": 0.55,
             "B_MAX_POS_NORMAL": 0.40,
-            "S_RISK": 0.008,
-            "S_MAX_POS": 0.18,
+
+
             "MAX_TOTAL_POSITION_RATIO": 1.00,
             "MAX_TOTAL_RISK_RATIO": 0.045,
             "DAILY_DD_STOP_PCT": -0.025,
@@ -108,8 +107,8 @@ BUILTIN_STRATEGY_DEFINITIONS = [
             "B_RSI_MIN": 53,
             "B_RSI_MAX": 84,
             "B_TAKE_PROFIT_R": 9.50,
-            "S_RISK": 0.010,
-            "S_MAX_POS": 0.20,
+
+
             "MAX_TOTAL_POSITION_RATIO": 1.75,
             "MAX_TOTAL_RISK_RATIO": 0.10,
         },
@@ -251,10 +250,6 @@ def validate_strategy_config(strategy: TradingStrategy, config: dict[str, Any]) 
     if not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="custom_config는 JSON object여야 합니다.")
 
-    default_leverage = (strategy.default_config or {}).get("LIQUIDATION_LEVERAGE", MAX_LEVERAGE)
-    if not is_allowed_leverage(config.get("LIQUIDATION_LEVERAGE", default_leverage)):
-        raise HTTPException(status_code=400, detail=f"LIQUIDATION_LEVERAGE: {LEVERAGE_LIMIT_MESSAGE}")
-
     editable_fields = set(strategy.editable_fields or [])
     unknown_fields = sorted(set(config.keys()) - editable_fields)
     if unknown_fields:
@@ -295,12 +290,6 @@ def validate_strategy_config(strategy: TradingStrategy, config: dict[str, Any]) 
         b_max = clean.get("B_RSI_MAX", (strategy.default_config or {}).get("B_RSI_MAX"))
         if b_min > b_max:
             raise HTTPException(status_code=400, detail="B_RSI_MIN은 B_RSI_MAX보다 클 수 없습니다.")
-
-    if "S_RSI_MIN" in clean or "S_RSI_MAX" in clean:
-        s_min = clean.get("S_RSI_MIN", (strategy.default_config or {}).get("S_RSI_MIN"))
-        s_max = clean.get("S_RSI_MAX", (strategy.default_config or {}).get("S_RSI_MAX"))
-        if s_min > s_max:
-            raise HTTPException(status_code=400, detail="S_RSI_MIN은 S_RSI_MAX보다 클 수 없습니다.")
 
     return clean
 
@@ -440,9 +429,6 @@ def create_admin_strategy(
 ) -> TradingStrategy:
     base_config = deepcopy(DEFAULT_V57_CONFIG)
     base_config.update(default_config or {})
-    if not is_allowed_leverage(base_config["LIQUIDATION_LEVERAGE"]):
-        raise HTTPException(status_code=400, detail=f"LIQUIDATION_LEVERAGE: {LEVERAGE_LIMIT_MESSAGE}")
-
     duplicated = (
         db.query(TradingStrategy)
         .filter(TradingStrategy.code == code, TradingStrategy.version == version)

@@ -18,7 +18,6 @@ class BinanceApiKey(Base):
     is_active = Column(Boolean, default=True)
 
     enable_reading = Column(Boolean, default=False)
-    enable_futures = Column(Boolean, default=False)
     enable_withdrawals = Column(Boolean, default=False)
     ip_restricted = Column(Boolean, default=False)
 

@@ -7,7 +7,6 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import (
     ALLOWED_ORIGINS,
-    BINANCE_FUTURES_BASE_URL,
     BINANCE_SPOT_BASE_URL,
     BINANCE_TESTNET,
     DISABLE_DOCS,
@@ -84,7 +83,6 @@ def root():
         "environment": ENVIRONMENT,
         "dry_run": DRY_RUN,
         "binance_testnet": BINANCE_TESTNET,
-        "futures_base_url": BINANCE_FUTURES_BASE_URL,
         "spot_base_url": BINANCE_SPOT_BASE_URL,
         "allowed_origins": ALLOWED_ORIGINS,
     }

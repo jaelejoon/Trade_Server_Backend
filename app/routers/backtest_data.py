@@ -18,7 +18,7 @@ INTERVAL_MINUTES = {"1m": 1, "15m": 15, "1h": 60, "4h": 240}
 INTEGRITY_QUERY = text("""
     WITH timestamps AS (
         SELECT open_time, count(*) AS rows_at_time
-        FROM candles_1m
+        FROM spot_candles_1m
         WHERE user_id = :user_id AND symbol = :symbol AND open_time < :closed_before
         GROUP BY open_time
     ), aligned AS (
@@ -49,7 +49,7 @@ CANDLES_QUERY = text("""
            max(high) AS high, min(low) AS low,
            (array_agg(close ORDER BY open_time DESC))[1] AS close,
            sum(volume) AS volume
-    FROM candles_1m
+    FROM spot_candles_1m
     WHERE user_id = :user_id AND symbol = :symbol
       AND open_time >= :lower_bound AND open_time < :upper_bound
       AND open_time = date_trunc('minute', open_time)

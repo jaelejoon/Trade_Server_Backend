@@ -14,7 +14,7 @@ def get_v57_signal_from_db_candles(db, user_id: int, symbol: str, sync_recent: b
             db=db,
             user_id=user_id,
             symbol=symbol,
-            limit=1500,
+            limit=1000,
         )
 
     candle_count = CandleService.get_candle_count(

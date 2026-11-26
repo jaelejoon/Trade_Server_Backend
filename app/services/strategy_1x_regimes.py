@@ -29,7 +29,7 @@ REGIMES = {
 }
 
 
-def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, funding, *, curve=True):
+def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, funding, *, curve=True):  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
     """Apply monthly long/cash decisions at the open and mark NAV each minute."""
     if not 0 < exposure < 1:
         raise ValueError("롱 전략 진입 비중은 0과 1 사이여야 합니다.")
@@ -40,7 +40,7 @@ def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, 
     realized, peak, mdd = initial, initial, 0.0
     quantity = 0.0
     trades = []
-    payments = {t: price * rate for t, (price, rate) in funding.items() if t in index}
+    payments = {t: price * rate for t, (price, rate) in funding.items() if t in index}  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
     positions = index.get_indexer(sorted(set(decisions) | set(payments) | {index[-1]}))
     positions = positions[positions >= 0]
 

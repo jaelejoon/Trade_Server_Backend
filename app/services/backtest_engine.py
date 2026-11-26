@@ -167,11 +167,11 @@ class Position:
 
 
 def replay(
-    candles, signals, initial_equity, leverage, fee_bps, slippage_bps, funding,
+    candles, signals, initial_equity, leverage, fee_bps, slippage_bps, funding,  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
     *, loss_limits=None, include_curve=True,
 ):
     """Signals indexed by availability time fill at that minute's open."""
-    if loss_limits is not None and leverage != 1:
+    if loss_limits is not None and leverage != 1:  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
         raise BacktestInputError("1배 전용 전략은 레버리지 1만 허용합니다.")
     fee_rate, slip = fee_bps / 10_000, slippage_bps / 10_000
     balance = peak = initial_equity
@@ -194,8 +194,8 @@ def replay(
             utc_day = time.date()
             if day != utc_day:
                 day, day_start_equity, daily_halt = utc_day, equity, False
-        if position and time in funding:
-            mark_price, rate = funding[time]
+        if position and time in funding:  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
+            mark_price, rate = funding[time]  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
             cost = position.side * position.quantity * mark_price * rate
             position.funding_cost += cost
             balance -= cost
@@ -210,7 +210,7 @@ def replay(
             quantity = min(
                 balance * signal.risk_fraction / risk_per_unit,
                 balance * signal.max_position_fraction / entry,
-                balance / (entry * (1 / leverage + fee_rate)),
+                balance / (entry * (1 / leverage + fee_rate)),  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
             )
             if quantity > 0 and (loss_limits is None or stop > 0):
                 max_entry_exposure_pct = max(max_entry_exposure_pct, quantity * entry / balance * 100)
@@ -225,7 +225,7 @@ def replay(
 
         if position:
             # Fixed 0.5% maintenance margin approximation on position notional.
-            margin = position.price / leverage - position.funding_cost / position.quantity
+            margin = position.price / leverage - position.funding_cost / position.quantity  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
             liquidation = (position.price * position.side - margin) / (position.side - 0.005)
             price, reason = position.close_price(bar, liquidation)
             exit_time = time
@@ -239,7 +239,7 @@ def replay(
                 trades.append({
                     "entry_time": position.time.isoformat() + "Z",
                     "exit_time": exit_time.isoformat() + "Z",
-                    "side": "LONG" if position.side == 1 else "SHORT",
+                    "side": "LONG" if position.side == 1 else "SHORT",  # 오프라인 비교 인터페이스. 현물 API는 1배와 비용 0으로 호출한다.
                     "entry_price": position.price,
                     "exit_price": exit_price,
                     "quantity": position.quantity,

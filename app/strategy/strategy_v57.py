@@ -4,7 +4,6 @@ import re
 import datetime
 from threading import RLock
 
-from app.core.trading_limits import MAX_LEVERAGE
 
 # ============================================================
 # V57_LONG_SAFE_PUSH
@@ -14,12 +13,10 @@ from app.core.trading_limits import MAX_LEVERAGE
 # - 청산 횟수 출력 유지
 # - LONG 강화
 # - LONG 손절 타이트
-# - SHORT 신호 정제
 #
 # 목표:
 # - 청산 0회 유지
 # - LONG 수익성 강화
-# - SHORT 품질 개선
 # - MDD -10% 내외 목표
 # ============================================================
 
@@ -28,9 +25,6 @@ INITIAL_CAPITAL = 10_000_000
 FEE_RATE = 0.0005
 SLIPPAGE = 0.0004
 
-ENABLE_LIQUIDATION_CHECK = True
-LIQUIDATION_LEVERAGE = float(MAX_LEVERAGE)
-LIQUIDATION_BUFFER_PCT = 0.05
 
 ATR_PERIOD = 14
 EMA_FAST = 20
@@ -78,7 +72,6 @@ MONTHLY_DD_STOP_PCT = -0.10
 PEAK_DD_STOP_PCT = -0.18
 
 USE_B_BREAKOUT_LONG = True
-USE_SHORT_CRASH = True
 
 # ============================================================
 # B LONG - V57 강화
@@ -104,22 +97,12 @@ B_MAX_POS_NORMAL = 0.60
 B_MAX_HOLD_BARS = 96
 
 # ============================================================
-# SHORT - V57 정제
 # ============================================================
 
-S_RSI_MIN = 22
 
 # V56: 51 → V57: 45
-S_RSI_MAX = 45
 
-S_ATR_PCT_MIN = 0.005
-S_BB_WIDTH_MIN = 0.020
-S_STOP_ATR_MULT = 1.22
-S_TAKE_PROFIT_R = 5.50
 
-S_RISK = 0.012
-S_MAX_POS = 0.25
-S_MAX_HOLD_BARS = 72
 
 
 # ============================================================
@@ -130,9 +113,6 @@ DEFAULT_V57_CONFIG = {
     "INITIAL_CAPITAL": INITIAL_CAPITAL,
     "FEE_RATE": FEE_RATE,
     "SLIPPAGE": SLIPPAGE,
-    "ENABLE_LIQUIDATION_CHECK": ENABLE_LIQUIDATION_CHECK,
-    "LIQUIDATION_LEVERAGE": LIQUIDATION_LEVERAGE,
-    "LIQUIDATION_BUFFER_PCT": LIQUIDATION_BUFFER_PCT,
     "ATR_PERIOD": ATR_PERIOD,
     "EMA_FAST": EMA_FAST,
     "EMA_SLOW": EMA_SLOW,
@@ -169,7 +149,6 @@ DEFAULT_V57_CONFIG = {
     "MONTHLY_DD_STOP_PCT": MONTHLY_DD_STOP_PCT,
     "PEAK_DD_STOP_PCT": PEAK_DD_STOP_PCT,
     "USE_B_BREAKOUT_LONG": USE_B_BREAKOUT_LONG,
-    "USE_SHORT_CRASH": USE_SHORT_CRASH,
     "B_RSI_MIN": B_RSI_MIN,
     "B_RSI_MAX": B_RSI_MAX,
     "B_ATR_PCT_MIN": B_ATR_PCT_MIN,
@@ -181,15 +160,6 @@ DEFAULT_V57_CONFIG = {
     "B_MAX_POS_STRONG": B_MAX_POS_STRONG,
     "B_MAX_POS_NORMAL": B_MAX_POS_NORMAL,
     "B_MAX_HOLD_BARS": B_MAX_HOLD_BARS,
-    "S_RSI_MIN": S_RSI_MIN,
-    "S_RSI_MAX": S_RSI_MAX,
-    "S_ATR_PCT_MIN": S_ATR_PCT_MIN,
-    "S_BB_WIDTH_MIN": S_BB_WIDTH_MIN,
-    "S_STOP_ATR_MULT": S_STOP_ATR_MULT,
-    "S_TAKE_PROFIT_R": S_TAKE_PROFIT_R,
-    "S_RISK": S_RISK,
-    "S_MAX_POS": S_MAX_POS,
-    "S_MAX_HOLD_BARS": S_MAX_HOLD_BARS,
 }
 
 
@@ -417,19 +387,6 @@ def add_common_indicators(df, prefix=""):
     return out
 
 
-def calc_liquidation_price(entry_price, side):
-    if not ENABLE_LIQUIDATION_CHECK:
-        return np.nan
-
-    if LIQUIDATION_LEVERAGE <= 1:
-        return np.nan
-
-    if side == "LONG":
-        return entry_price * (1 - (1 / LIQUIDATION_LEVERAGE) + LIQUIDATION_BUFFER_PCT)
-
-    return entry_price * (1 + (1 / LIQUIDATION_LEVERAGE) - LIQUIDATION_BUFFER_PCT)
-
-
 def prepare_data(raw_df):
     df = raw_df.copy()
 
@@ -566,37 +523,16 @@ def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False):
             (df_1h["bb_width"] >= B_BB_WIDTH_MIN)
     )
 
-    df_1h["signal_short_crash_raw"] = (
-            USE_SHORT_CRASH &
-            (df_1h["market_regime"] == "BEAR") &
-            (df_1h["close"] < df_1h["ema_fast"]) &
-            (df_1h["close"] < df_1h["open"]) &
-            (df_1h["close"] < df_1h["prev_close"]) &
-            (df_1h["rsi"] >= S_RSI_MIN) &
-            (df_1h["rsi"] <= S_RSI_MAX) &
-            (df_1h["atr_pct"] >= S_ATR_PCT_MIN) &
-            (df_1h["bb_width"] >= S_BB_WIDTH_MIN)
-    )
-
     if ENABLE_EVENT_FILTER and BLOCK_ENTRY_ON_EXTREME_VOLATILITY:
         df_1h["signal_b_breakout_long"] = df_1h["signal_b_breakout_long_raw"] & (~df_1h["extreme_volatility"])
-        df_1h["signal_short_crash"] = df_1h["signal_short_crash_raw"] & (~df_1h["extreme_volatility"])
     else:
         df_1h["signal_b_breakout_long"] = df_1h["signal_b_breakout_long_raw"]
-        df_1h["signal_short_crash"] = df_1h["signal_short_crash_raw"]
 
     if ENABLE_BAD_HOUR_FILTER:
         df_1h["signal_b_breakout_long"] &= ~df_1h["bad_entry_hour_1h"]
-        df_1h["signal_short_crash"] &= ~df_1h["bad_entry_hour_1h"]
 
     df_1h["signal_strategy_1h"] = np.where(
-        df_1h["signal_b_breakout_long"],
-        "B_1H_BREAKOUT_LONG",
-        np.where(
-            df_1h["signal_short_crash"],
-            "S_SHORT_CRASH",
-            "NONE"
-        )
+        df_1h["signal_b_breakout_long"], "B_1H_BREAKOUT_LONG", "NONE"
     )
 
     df_1h["entry_signal_1h"] = df_1h["signal_strategy_1h"] != "NONE"
@@ -655,7 +591,6 @@ def print_signal_diagnostics(df_1h, df_15m, df_4h):
     print()
     print("[1H 전략별 신호]")
     print(f"B_1H_BREAKOUT_LONG raw/final: {int(df_1h['signal_b_breakout_long_raw'].sum())} / {int(df_1h['signal_b_breakout_long'].sum())}")
-    print(f"S_SHORT_CRASH raw/final: {int(df_1h['signal_short_crash_raw'].sum())} / {int(df_1h['signal_short_crash'].sum())}")
 
     print()
     print("[최종 신호]")
@@ -673,8 +608,6 @@ def print_signal_diagnostics(df_1h, df_15m, df_4h):
 
 
 def get_strategy_side(strategy):
-    if strategy == "S_SHORT_CRASH":
-        return "SHORT"
     return "LONG"
 
 
@@ -689,15 +622,6 @@ def get_strategy_config(strategy, market_regime, event_risk):
             "stop_atr_mult": B_STOP_ATR_MULT,
             "take_profit_r": B_TAKE_PROFIT_R,
             "max_hold_bars": B_MAX_HOLD_BARS
-        }
-
-    elif strategy == "S_SHORT_CRASH":
-        config = {
-            "risk_per_trade": S_RISK,
-            "max_position_ratio": S_MAX_POS,
-            "stop_atr_mult": S_STOP_ATR_MULT,
-            "take_profit_r": S_TAKE_PROFIT_R,
-            "max_hold_bars": S_MAX_HOLD_BARS
         }
 
     else:
@@ -825,9 +749,6 @@ def advance_position(position, row, exchange_managed=False):
     position["max_favorable_r"] = max(position["max_favorable_r"], favorable / position["initial_risk"])
     position["max_adverse_r"] = min(position["max_adverse_r"], adverse / position["initial_risk"])
     if not exchange_managed:
-        liquidation = position.get("liquidation_price", np.nan)
-        if ENABLE_LIQUIDATION_CHECK and liquidation is not None and ((long and row["low"] <= liquidation) or (not long and row["high"] >= liquidation)):
-            return "LIQUIDATION", min(row["open"], liquidation) if long else max(row["open"], liquidation)
         stop = position["stop_price"]
         if (long and row["low"] <= stop) or (not long and row["high"] >= stop):
             reason = "TRAIL_STOP" if position.get("trailing_stop_activated") else "STOP"
@@ -928,7 +849,6 @@ def backtest(df_15m, signal_events, funding_rates=None):
             if current_events:
                 priority = {
                     "B_1H_BREAKOUT_LONG": 1,
-                    "S_SHORT_CRASH": 2
                 }
 
                 sorted_signals = sorted(
@@ -1016,7 +936,6 @@ def backtest(df_15m, signal_events, funding_rates=None):
 
                     balance -= entry_fee
 
-                    liquidation_price = calc_liquidation_price(entry_price, side)
 
                     position = {
                         "trade_id": trade_id_seq,
@@ -1027,8 +946,6 @@ def backtest(df_15m, signal_events, funding_rates=None):
                         "risk_per_trade": risk_per_trade,
                         "original_risk_per_trade": config["original_risk_per_trade"],
                         "max_position_ratio": max_position_ratio,
-                        "leverage": LIQUIDATION_LEVERAGE,
-                        "liquidation_price": liquidation_price,
                         "entry_time": time,
                         "entry_price": entry_price,
                         "stop_price": stop_price,
@@ -1086,8 +1003,6 @@ def backtest(df_15m, signal_events, funding_rates=None):
                     "risk_per_trade": position["risk_per_trade"],
                     "original_risk_per_trade": position["original_risk_per_trade"],
                     "max_position_ratio": position["max_position_ratio"],
-                    "leverage": position["leverage"],
-                    "liquidation_price": position["liquidation_price"],
                     "entry_time": position["entry_time"],
                     "exit_time": time,
                     "entry_price": entry_price,
