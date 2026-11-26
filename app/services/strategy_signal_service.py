@@ -1,8 +1,15 @@
+from functools import lru_cache
+
 from app.core.config import MIN_STRATEGY_1M_CANDLES, STRATEGY_LOAD_1M_LIMIT
 from app.services.binance_candle_sync import BinanceCandleSyncService
 from app.services.candle_service import CandleService
-from app.strategy.strategy_v57 import V57ConfigOverride, get_latest_v57_signal, signal_to_dict
+from app.strategy.strategy_v57 import ClosedCandleAggregation, V57ConfigOverride, get_latest_v57_signal, signal_to_dict
 from app.services.trading_strategy_service import get_effective_strategy_for_user
+
+
+@lru_cache(maxsize=8)
+def closed_aggregation(user_id, symbol):
+    return ClosedCandleAggregation()
 
 
 def get_v57_signal_from_db_candles(db, user_id: int, symbol: str, sync_recent: bool = True, trading_account_id: int | None = None):
@@ -50,7 +57,7 @@ def get_v57_signal_from_db_candles(db, user_id: int, symbol: str, sync_recent: b
 
     _, config, _ = get_effective_strategy_for_user(db, user_id, trading_account_id)
     with V57ConfigOverride(config):
-        signal = get_latest_v57_signal(raw_df)
+        signal = get_latest_v57_signal(raw_df, aggregation=closed_aggregation(user_id, symbol))
     signal_dict = signal_to_dict(signal)
 
     if not signal.has_signal:

@@ -364,6 +364,45 @@ def resample_ohlcv(df, rule):
     return result.loc[grouped["close"].count() == expected].dropna()
 
 
+class ClosedCandleAggregation:
+    """Reuse complete OHLCV buckets across overlapping closed-minute windows."""
+
+    rules = ("15min", "1h", "4h")
+
+    def __init__(self):
+        self.minutes = None
+        self.frames = None
+
+    def update(self, minutes):
+        reusable = None
+        if self.minutes is not None and not self.minutes.empty and not minutes.empty:
+            start = max(self.minutes.index[0], minutes.index[0])
+            end = min(self.minutes.index[-1], minutes.index[-1])
+            if start <= end and self.minutes.loc[start:end].equals(minutes.loc[start:end]):
+                reusable = (start, end)
+
+        frames = []
+        for i, rule in enumerate(self.rules):
+            if reusable is None:
+                frames.append(resample_ohlcv(minutes, rule))
+                continue
+            start, end = reusable
+            first = start.ceil(rule)
+            past_last = (end + pd.Timedelta(minutes=1)).floor(rule)
+            if first >= past_last:
+                frames.append(resample_ohlcv(minutes, rule))
+                continue
+            previous = self.frames[i]
+            kept = previous[(previous.index >= first) & (previous.index < past_last)]
+            head = resample_ohlcv(minutes[minutes.index < first], rule)
+            tail = resample_ohlcv(minutes[minutes.index >= past_last], rule)
+            frames.append(pd.concat([head, kept, tail]).sort_index())
+
+        self.minutes = minutes.copy()
+        self.frames = tuple(frames)
+        return self.frames
+
+
 def add_common_indicators(df, prefix=""):
     out = df.copy()
 
@@ -387,7 +426,7 @@ def add_common_indicators(df, prefix=""):
     return out
 
 
-def prepare_data(raw_df):
+def prepare_data(raw_df, *, aggregation=None):
     df = raw_df.copy()
 
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -411,15 +450,16 @@ def prepare_data(raw_df):
     print(f"정렬/중복제거 후 데이터 수: {len(df)}")
 
     return prepare_closed_candles(
-        df.set_index("timestamp"), diagnostics=True, legacy_alignment=True,
+        df.set_index("timestamp"), diagnostics=True, legacy_alignment=True, aggregation=aggregation,
     )
 
 
-def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False):
+def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False, aggregation=None):
     """Build V57 features from sorted, UTC-indexed closed one-minute candles."""
-    df_15m = resample_ohlcv(df, "15min")
-    df_1h = resample_ohlcv(df, "1h")
-    df_4h = resample_ohlcv(df, "4h")
+    if aggregation is None:
+        df_15m, df_1h, df_4h = (resample_ohlcv(df, rule) for rule in ClosedCandleAggregation.rules)
+    else:
+        df_15m, df_1h, df_4h = aggregation.update(df)
 
     df_15m = add_common_indicators(df_15m, prefix="m15_")
     df_1h = add_common_indicators(df_1h, prefix="")
@@ -1331,7 +1371,7 @@ def _to_optional_float(value):
         return None
 
 
-def get_latest_v57_signal(raw_df: pd.DataFrame, now=None) -> V57SignalResult:
+def get_latest_v57_signal(raw_df: pd.DataFrame, now=None, *, aggregation=None) -> V57SignalResult:
     if raw_df is None or raw_df.empty:
         return empty_signal("NO_RAW_DATA")
 
@@ -1346,7 +1386,8 @@ def get_latest_v57_signal(raw_df: pd.DataFrame, now=None) -> V57SignalResult:
         return empty_signal("STALE_CANDLE_DATA")
 
     try:
-        df_1h, df_15m = prepare_data(raw_df)
+        df_1h, df_15m = (prepare_data(raw_df) if aggregation is None
+                         else prepare_data(raw_df, aggregation=aggregation))
     except Exception as exc:
         return empty_signal(f"PREPARE_DATA_ERROR: {exc}")
 
