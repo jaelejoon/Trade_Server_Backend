@@ -20,13 +20,13 @@ def bot_tick_job(trading_account_id: int):
         if not account or not account.is_running:
             return
         execute_bot_tick(db=db, account=account)
-    except Exception as exc:
+    except Exception:
         try:
             create_error_log(
                 db=db,
                 trading_account_id=trading_account_id,
                 source='bot_tick_job',
-                message=str(exc),
+                message='자동매매 작업 처리 실패',
             )
         except Exception:
             db.rollback()

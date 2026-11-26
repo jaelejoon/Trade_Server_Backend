@@ -1,25 +1,79 @@
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.config import CANDLE_WARMUP_DAYS, DRY_RUN
+from app.core.config import CANDLE_WARMUP_DAYS
 from app.core.jwt import get_current_user
+from app.core.trading_limits import normalize_trading_symbol
 from app.db.session import get_db
 from app.models.error_log import ErrorLog
 from app.models.trade_log import TradeLog
 from app.models.trading_account import TradingAccount
 from app.models.user import User
+from app.routers.admin import require_admin
 from app.schemas import BotTickRequest, TradingAccountCreateRequest, TradingAccountResponse
 from app.scheduler.bot_scheduler import start_account_job, stop_account_job
-from app.services.account_service import get_api_key_owned_by_user, get_trading_account_owned_by_user
+from app.services.account_service import get_active_trading_account_owned_by_user, get_api_key_owned_by_user, get_trading_account_owned_by_user
 from app.services.binance_candle_sync import BinanceCandleSyncService
-from app.services.binance_service import get_decrypted_api_keys
-from app.services.bot_service import execute_bot_tick, reconcile_position_and_open_orders
+from app.core.security import sanitize_sensitive_text
+from app.services.binance_service import get_decrypted_api_keys, get_futures_balance_raw, get_futures_positions_raw
+from app.services.bot_service import execute_bot_tick, is_account_live_trading_enabled, reconcile_position_and_open_orders
 
 router = APIRouter(tags=["trading"])
 
+
+
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == '':
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_futures_balance_item(item: dict) -> dict:
+    return {
+        'asset': item.get('asset'),
+        'balance': _to_float(item.get('balance')),
+        'available_balance': _to_float(item.get('availableBalance')),
+        'cross_wallet_balance': _to_float(item.get('crossWalletBalance')),
+        'cross_unrealized_pnl': _to_float(item.get('crossUnPnl')),
+        'max_withdraw_amount': _to_float(item.get('maxWithdrawAmount')),
+    }
+
+
+def _parse_futures_position_item(item: dict) -> dict | None:
+    position_amt = _to_float(item.get('positionAmt'))
+
+    if abs(position_amt) <= 0:
+        return None
+
+    entry_price = _to_float(item.get('entryPrice'))
+    mark_price = _to_float(item.get('markPrice'))
+    unrealized_pnl = _to_float(item.get('unRealizedProfit'))
+    notional = _to_float(item.get('notional'))
+    isolated_wallet = _to_float(item.get('isolatedWallet'))
+    initial_margin = abs(notional) / _to_float(item.get('leverage'), 1.0) if _to_float(item.get('leverage'), 0.0) > 0 else isolated_wallet
+    pnl_base = abs(initial_margin) if abs(initial_margin) > 0 else abs(notional)
+    pnl_rate = unrealized_pnl / pnl_base * 100 if pnl_base > 0 else 0.0
+
+    return {
+        'symbol': item.get('symbol'),
+        'position_side': 'LONG' if position_amt > 0 else 'SHORT',
+        'position_amt': position_amt,
+        'entry_price': entry_price,
+        'mark_price': mark_price,
+        'notional': notional,
+        'unrealized_pnl': unrealized_pnl,
+        'pnl_rate': pnl_rate,
+        'leverage': _to_float(item.get('leverage')),
+        'liquidation_price': _to_float(item.get('liquidationPrice')),
+        'margin_type': item.get('marginType'),
+        'isolated_wallet': isolated_wallet,
+    }
 
 def ensure_active_trading_account(account: TradingAccount):
     if not account.is_active:
@@ -44,6 +98,7 @@ def create_trading_account(
         leverage=body.leverage,
         max_risk_ratio=body.max_risk_ratio,
         max_daily_loss_ratio=body.max_daily_loss_ratio,
+        dry_run=current_user.dry_run,
         is_running=False,
         is_active=True,
     )
@@ -138,6 +193,7 @@ def trading_status(
                 "leverage": account.leverage,
                 "max_risk_ratio": account.max_risk_ratio,
                 "max_daily_loss_ratio": account.max_daily_loss_ratio,
+                "dry_run": account.dry_run,
                 "is_running": account.is_running,
                 "is_active": account.is_active,
                 "created_at": account.created_at,
@@ -147,8 +203,9 @@ def trading_status(
 
     return {
         "status": "ok",
-        "dry_run": DRY_RUN,
-        "is_live_trading": not DRY_RUN,
+        "dry_run": all(account.dry_run for account in accounts) if accounts else current_user.dry_run,
+        "is_live_trading": any(is_account_live_trading_enabled(db, account) for account in accounts),
+        "enable_live_trading": current_user.enable_live_trading,
         "user_id": current_user.id,
         "summary": {
             "total_accounts": total_accounts,
@@ -173,13 +230,16 @@ def start_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
+    try:
+        symbol = normalize_trading_symbol(account.symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     sync_result = BinanceCandleSyncService.warmup_historical_1m_candles(
         db=db,
         user_id=current_user.id,
-        symbol=account.symbol,
+        symbol=symbol,
         days=CANDLE_WARMUP_DAYS,
     )
 
@@ -203,8 +263,7 @@ def stop_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
     account.is_running = False
     db.commit()
@@ -224,8 +283,7 @@ def bot_tick(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, body.trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, body.trading_account_id)
 
     return execute_bot_tick(db=db, account=account)
 
@@ -236,8 +294,7 @@ def reconcile_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(db, current_user.id, trading_account_id)
-    ensure_active_trading_account(account)
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
     api_key_item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
     api_key, secret_key = get_decrypted_api_keys(api_key_item)
@@ -246,18 +303,76 @@ def reconcile_trading_account(
         api_key=api_key,
         secret_key=secret_key,
         symbol=account.symbol,
+        account_dry_run=account.dry_run,
+        live_trading_enabled=is_account_live_trading_enabled(db, account),
     )
+
+
+@router.get('/trading/accounts/{trading_account_id}/portfolio')
+def get_trading_account_portfolio(
+    trading_account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
+    api_key_item = get_api_key_owned_by_user(db, current_user.id, account.api_key_id)
+    api_key, secret_key = get_decrypted_api_keys(api_key_item)
+
+    raw_balances = get_futures_balance_raw(api_key, secret_key)
+    raw_positions = get_futures_positions_raw(api_key, secret_key, symbol=account.symbol)
+
+    if isinstance(raw_positions, dict):
+        raw_positions = [raw_positions]
+
+    balances = [_parse_futures_balance_item(item) for item in raw_balances if isinstance(item, dict)]
+    positions = [parsed for item in raw_positions if isinstance(item, dict) for parsed in [_parse_futures_position_item(item)] if parsed]
+
+    usdt_balance = next((item for item in balances if item.get('asset') == 'USDT'), None)
+    wallet_balance = usdt_balance['balance'] if usdt_balance else 0.0
+    available_balance = usdt_balance['available_balance'] if usdt_balance else 0.0
+    unrealized_pnl = sum(position['unrealized_pnl'] for position in positions)
+    estimated_equity = wallet_balance + unrealized_pnl
+    pnl_rate = unrealized_pnl / wallet_balance * 100 if wallet_balance > 0 else 0.0
+
+    return {
+        'status': 'ok',
+        'dry_run': account.dry_run,
+        'trading_account_id': account.id,
+        'api_key_id': account.api_key_id,
+        'symbol': account.symbol,
+        'summary': {
+            'asset': 'USDT',
+            'wallet_balance': wallet_balance,
+            'available_balance': available_balance,
+            'estimated_equity': estimated_equity,
+            'unrealized_pnl': unrealized_pnl,
+            'pnl_rate': pnl_rate,
+            'position_count': len(positions),
+        },
+        'balances': balances,
+        'positions': positions,
+    }
 
 
 @router.get("/trading/logs")
 def trading_logs(
     limit: int = 100,
+    trading_account_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    query = db.query(TradeLog).filter(TradeLog.user_id == current_user.id)
+
+    if trading_account_id is not None:
+        account = get_trading_account_owned_by_user(
+            db=db,
+            user_id=current_user.id,
+            trading_account_id=trading_account_id,
+        )
+        query = query.filter(TradeLog.trading_account_id == account.id)
+
     logs = (
-        db.query(TradeLog)
-        .filter(TradeLog.user_id == current_user.id)
+        query
         .order_by(TradeLog.id.desc())
         .limit(limit)
         .all()
@@ -269,12 +384,16 @@ def trading_logs(
 @router.get("/trading/error-logs")
 def error_logs(
     limit: int = 100,
+    trading_account_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _admin: User = Depends(require_admin),
 ):
+    query = db.query(ErrorLog)
+    if trading_account_id is not None:
+        query = query.filter(ErrorLog.trading_account_id == trading_account_id)
+
     logs = (
-        db.query(ErrorLog)
-        .filter((ErrorLog.user_id == current_user.id) | (ErrorLog.user_id == None))
+        query
         .order_by(ErrorLog.id.desc())
         .limit(limit)
         .all()
@@ -287,8 +406,8 @@ def error_logs(
             "trading_account_id": log.trading_account_id,
             "level": log.level,
             "source": log.source,
-            "message": log.message,
-            "raw_data": log.raw_data,
+            "message": "자동매매 처리 중 오류가 발생했습니다.",
+            "raw_data": None,
             "created_at": log.created_at,
         }
         for log in logs
@@ -333,13 +452,11 @@ def delete_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    account = get_trading_account_owned_by_user(
+    account = get_active_trading_account_owned_by_user(
         db,
         current_user.id,
         trading_account_id,
     )
-
-    ensure_active_trading_account(account)
 
     if account.is_running:
         raise HTTPException(
@@ -388,7 +505,7 @@ def serialize_trade_log(log: TradeLog | None):
         "client_order_id": log.client_order_id,
         "emergency_close_executed": log.emergency_close_executed,
         "emergency_close_order_id": log.emergency_close_order_id,
-        "error_message": log.error_message,
-        "raw_response": log.raw_response,
+        "error_message": "자동매매 처리 중 오류가 발생했습니다." if log.error_message else None,
+        "raw_response": sanitize_sensitive_text(log.raw_response) if log.raw_response and not log.error_message else None,
         "created_at": log.created_at,
     }
