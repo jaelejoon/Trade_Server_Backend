@@ -1,5 +1,7 @@
 """Recover only BTC backed by this bot's confirmed fills."""
 
+from decimal import Decimal
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
@@ -37,4 +39,6 @@ def inspect_recovery(db, account_id, exchange):
     btc = next((item for item in balances if item["asset"] == "BTC"), {"free": "0", "locked": "0"})
     recovery = recovery_quantity(rows, btc["free"], btc["locked"])
     orders = [item for item in exchange.open_order_lists() if item["symbol"] == "BTCUSDT"]
+    recovery["owned"] = recovery_quantity(rows, "1E30", "0")["quantity"]
+    recovery["balance"] = Decimal(btc["free"]) + Decimal(btc["locked"])
     return recovery, orders

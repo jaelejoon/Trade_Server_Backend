@@ -170,6 +170,24 @@ class SpotExchange:
             "/api/v3/orderList", client_id, list_order=True,
         )
 
+    def lookup(self, client_id, *, order_list=False):
+        params = {"origClientOrderId": client_id}
+        if not order_list:
+            params["symbol"] = SYMBOL
+        try:
+            return self._signed("GET", "/api/v3/orderList" if order_list else "/api/v3/order", params)
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("binance_code") in {-2013, -2026}:
+                return None
+            raise
+
+    def trades(self, order_id):
+        return self._signed("GET", "/api/v3/myTrades", {"symbol": SYMBOL, "orderId": order_id, "limit": 1000})
+
+    def price(self):
+        response = binance_public_get(BINANCE_SPOT_BASE_URL, "/api/v3/ticker/price", {"symbol": SYMBOL})
+        return Decimal(response["price"])
+
     def account(self):
         return self._signed("GET", "/api/v3/account")
 

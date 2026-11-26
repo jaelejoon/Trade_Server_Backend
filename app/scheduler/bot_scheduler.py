@@ -70,8 +70,10 @@ def recover_running_account_jobs():
     try:
         accounts = db.query(TradingAccount).filter(TradingAccount.is_running == True, TradingAccount.market_type == "SPOT").all()
         for account in accounts:
-            start_account_job(account.id)
-            recovered += 1
+            execute_bot_tick(db, account, recover_only=True)
+            if account.is_running:
+                start_account_job(account.id)
+                recovered += 1
         return recovered
     finally:
         db.close()

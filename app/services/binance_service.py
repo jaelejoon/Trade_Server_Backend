@@ -13,6 +13,7 @@ from app.core.config import (
     BINANCE_REQUEST_TIMEOUT_SECONDS,
     BINANCE_RETRY_BASE_SLEEP_SECONDS,
     BINANCE_SPOT_BASE_URL,
+    BINANCE_TESTNET,
     SERVER_TIME_DRIFT_LIMIT_MS,
     DRY_RUN,
     ENABLE_LIVE_TRADING,
@@ -81,14 +82,14 @@ def binance_signed_request(
 ):
     allowed_paths = {
         "GET": {"/api/v3/account", "/api/v3/order", "/api/v3/orderList",
-                "/api/v3/openOrderList", "/sapi/v1/account/apiRestrictions"},
+                "/api/v3/openOrderList", "/api/v3/myTrades", "/sapi/v1/account/apiRestrictions"},
         "POST": {"/api/v3/order", "/api/v3/orderList/oco"},
     }
     if base_url != BINANCE_SPOT_BASE_URL or path not in allowed_paths.get(method, set()):
         raise HTTPException(status_code=403, detail="현물 요청 경로가 허용되지 않습니다.")
     params = params or {}
     if method != "GET":
-        if DRY_RUN or not ENABLE_LIVE_TRADING:
+        if DRY_RUN or not ENABLE_LIVE_TRADING or not BINANCE_TESTNET:
             raise HTTPException(status_code=403, detail="현물 쓰기 요청이 허용되지 않습니다.")
         if params.get("symbol") != "BTCUSDT":
             raise HTTPException(status_code=400, detail="BTCUSDT만 주문할 수 있습니다.")

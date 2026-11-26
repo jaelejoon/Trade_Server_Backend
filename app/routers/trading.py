@@ -19,7 +19,7 @@ from app.services.account_service import get_active_trading_account_owned_by_use
 from app.services.binance_candle_sync import BinanceCandleSyncService
 from app.core.security import sanitize_sensitive_text
 from app.services.binance_service import get_decrypted_api_keys
-from app.services.bot_service import execute_bot_tick
+from app.services.bot_service import execute_bot_tick, is_account_live_trading_enabled
 
 from app.services.spot_service import SpotExchange
 from app.services.spot_recovery_service import inspect_recovery
