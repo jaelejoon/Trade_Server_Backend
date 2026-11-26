@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.config import CANDLE_WARMUP_DAYS
+from app.core.config import CANDLE_WARMUP_DAYS, ENABLE_TRADING_SCHEDULER
 from app.core.jwt import get_current_user
 from app.core.trading_limits import normalize_trading_symbol
 from app.db.session import get_db
@@ -230,6 +230,8 @@ def start_trading_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if not ENABLE_TRADING_SCHEDULER:
+        raise HTTPException(status_code=409, detail="자동매매 스케줄러가 꺼져 있습니다.")
     account = get_active_trading_account_owned_by_user(db, current_user.id, trading_account_id)
 
     try:

@@ -404,25 +404,3 @@ def get_usdt_equity(api_key: str, secret_key: str) -> float:
         if item.get('asset') == 'USDT':
             return float(item['balance']) + float(item.get('crossUnPnl', 0))
     return 0.0
-
-
-def get_funding_rate_history(symbol: str, start_ms: int, end_ms: int):
-    payments = []
-    cursor = start_ms
-    while cursor <= end_ms:
-        page = binance_public_get(BINANCE_FUTURES_BASE_URL, '/fapi/v1/fundingRate', {'symbol': symbol.upper(), 'startTime': cursor, 'endTime': end_ms, 'limit': 1000})
-        if not page:
-            break
-        for payment in page:
-            if float(payment.get('markPrice', 0)) <= 0:
-                raise ValueError('펀딩 기준가격이 없어 백테스트 비용을 계산할 수 없습니다.')
-        payments.extend(page)
-        next_cursor = int(page[-1]['fundingTime']) + 1
-        if next_cursor <= cursor:
-            raise ValueError('펀딩 조회가 진행되지 않아 백테스트를 중단했습니다.')
-        cursor = next_cursor
-        if len(page) < 1000:
-            break
-    if end_ms - start_ms >= 86400000 and not payments:
-        raise ValueError('펀딩 내역이 비어 있습니다. 거래 시장과 조회 기간을 확인하세요.')
-    return payments

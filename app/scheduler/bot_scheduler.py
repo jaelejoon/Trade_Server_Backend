@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from app.core.config import BOT_INTERVAL_SECONDS
+from app.core.config import BOT_INTERVAL_SECONDS, ENABLE_TRADING_SCHEDULER
 from app.db.session import SessionLocal
 from app.models.trading_account import TradingAccount
 from app.services.bot_service import execute_bot_tick
@@ -14,6 +14,8 @@ def get_job_id(trading_account_id: int) -> str:
 
 
 def bot_tick_job(trading_account_id: int):
+    if not ENABLE_TRADING_SCHEDULER:
+        return
     db = SessionLocal()
     try:
         account = db.query(TradingAccount).filter(TradingAccount.id == trading_account_id).first()
@@ -35,6 +37,8 @@ def bot_tick_job(trading_account_id: int):
 
 
 def start_account_job(trading_account_id: int):
+    if not ENABLE_TRADING_SCHEDULER:
+        return
     job_id = get_job_id(trading_account_id)
     existing = scheduler.get_job(job_id)
     if existing:
@@ -74,6 +78,8 @@ def recover_running_account_jobs():
 
 
 def start_scheduler():
+    if not ENABLE_TRADING_SCHEDULER:
+        return 0
     if not scheduler.running:
         scheduler.start()
     return recover_running_account_jobs()

@@ -1,7 +1,5 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
-from math import isfinite
 from typing import Literal
 
 import pandas as pd
@@ -26,7 +24,6 @@ from app.services.backtest_engine import (
     validate_candles,
 )
 from app.services.strategy_1x_regimes import replay_regime
-from app.services.binance_service import binance_public_get
 
 
 router = APIRouter(prefix="/runs")
@@ -44,10 +41,10 @@ class RunRequest(BaseModel):
     start: AwareDatetime
     end: AwareDatetime
     initial_equity_usdt: float = Field(ge=0.01, le=1_000_000_000)
-    leverage: int = Field(default=1, strict=True, ge=1, le=2)
+    leverage: int = Field(default=1, strict=True, ge=1, le=1)
     fee_bps: float = Field(default=5, ge=0, le=100)
     slippage_bps: float = Field(default=0, ge=0, le=100)
-    funding: Literal["historical", "disabled"] = "historical"
+    funding: Literal["disabled"] = "disabled"
 
     @field_validator("start", "end", mode="before")
     @classmethod
@@ -72,46 +69,7 @@ class RunRequest(BaseModel):
         strategy = STRATEGIES.get(self.strategy_id)
         if strategy is None or strategy.version != self.strategy_version:
             raise ValueError("지원하지 않는 전략 또는 전략 버전입니다.")
-        if strategy.one_x_only and self.leverage != 1:
-            raise ValueError("1배 전용 전략은 레버리지 1만 허용합니다.")
         return self
-
-
-def load_funding(body):
-    if body.funding == "disabled":
-        return {}, "disabled"
-
-    start_ms = int(body.start.timestamp() * 1000)
-    end_ms = int(body.end.timestamp() * 1000)
-    try:
-        payments = binance_public_get("https://fapi.binance.com", "/fapi/v1/fundingRate", {
-            "symbol": body.symbol, "startTime": start_ms, "endTime": end_ms - 1, "limit": 1000,
-        })
-        if not isinstance(payments, list) or len(payments) >= 1000:
-            raise ValueError("Invalid funding response")
-        funding = {}
-        for payment in payments:
-            time_ms = int(payment["fundingTime"])
-            time = pd.Timestamp(time_ms, unit="ms").floor("min")
-            price, rate = float(payment["markPrice"]), float(payment["fundingRate"])
-            if (
-                not start_ms <= time_ms < end_ms
-                or time in funding
-                or not isfinite(price) or price <= 0
-                or not isfinite(rate) or abs(rate) > 1
-            ):
-                raise ValueError("Invalid funding record")
-            funding[time] = (price, rate)
-    except (HTTPException, KeyError, TypeError, ValueError) as exc:
-        raise BacktestInputError("과거 펀딩 데이터 조회 또는 검증에 실패했습니다.") from exc
-
-    if not funding:
-        return {}, "unavailable"
-    boundaries = [pd.Timestamp(body.start).tz_localize(None), *sorted(funding),
-                  pd.Timestamp(body.end).tz_localize(None)]
-    if any(right - left > pd.Timedelta(hours=8) for left, right in zip(boundaries, boundaries[1:])):
-        raise BacktestInputError("과거 펀딩 데이터에 8시간을 초과하는 공백이 있습니다.")
-    return funding, "applied"
 
 
 def simulate(db, user_id, body):
@@ -131,19 +89,17 @@ def simulate(db, user_id, body):
     # One ordered SQL statement supplies the exact snapshot used by the simulation.
     db.rollback()
     validate_candles(candles, warmup_start, end)
-    funding, funding_status = load_funding(body)
     if strategy.regime is not None:
         result = replay_regime(
             candles.loc[start:], strategy.regime.decisions(candles), strategy.regime.exposure,
-            body.initial_equity_usdt, body.fee_bps, body.slippage_bps, funding,
+            body.initial_equity_usdt, body.fee_bps, body.slippage_bps, {},
         )
     else:
         result = replay(
             candles.loc[start:], strategy.signals(candles), body.initial_equity_usdt,
-            body.leverage, body.fee_bps, body.slippage_bps, funding,
+            body.leverage, body.fee_bps, body.slippage_bps, {},
             loss_limits=strategy.loss_limits,
         )
-    funding_hash = sha256(repr(sorted(funding.items())).encode()).hexdigest() if funding else None
     return {
         **result,
         "engine_version": ENGINE_VERSION,
@@ -152,11 +108,11 @@ def simulate(db, user_id, body):
         "candle_count": len(candles),
         "candle_sha256": candle_checksum(candles),
         "funding": {
-            "status": funding_status,
-            "label": "반영" if funding_status == "applied" else "미반영",
-            "record_count": len(funding),
-            "sha256": funding_hash,
-            "net_cost_usdt": sum(trade["funding_cost_usdt"] for trade in result["trades"]),
+            "status": "disabled",
+            "label": "미반영",
+            "record_count": 0,
+            "sha256": None,
+            "net_cost_usdt": 0.0,
         },
     }
 

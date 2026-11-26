@@ -115,20 +115,14 @@ REQUEST = {
 }
 
 
-def test_funding_empty_and_invalid(monkeypatch):
+def test_spot_run_defaults_to_zero_funding():
     body = api.RunRequest.model_validate(REQUEST)
-    monkeypatch.setattr(api, "binance_public_get", lambda *args: [])
-    assert api.load_funding(body) == ({}, "unavailable")
-    record = {"fundingTime": int(body.start.timestamp() * 1000), "fundingRate": "0.01", "markPrice": "100"}
-    monkeypatch.setattr(api, "binance_public_get", lambda *args: [record])
-    assert api.load_funding(body) == ({pd.Timestamp("2026-01-01"): (100.0, 0.01)}, "applied")
-    monkeypatch.setattr(api, "binance_public_get", lambda *args: [record, record])
-    with pytest.raises(BacktestInputError):
-        api.load_funding(body)
+    assert body.funding == "disabled"
+    assert body.leverage == 1
 
 
 @pytest.mark.parametrize("changes", [
-    {"symbol": "ETHUSDT"}, {"leverage": 3}, {"leverage": True}, {"strategy_version": "2"},
+    {"symbol": "ETHUSDT"}, {"funding": "historical"}, {"leverage": 2}, {"leverage": True}, {"strategy_version": "2"},
     {"start": 1767225600}, {"start": "2026-01-01T00:00:00"}, {"end": "2026-03-01T00:00:00Z"},
 ])
 def test_request_constraints(changes):

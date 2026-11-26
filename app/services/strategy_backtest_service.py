@@ -16,7 +16,6 @@ from app.models.candle import Candle1m
 from app.models.trading_account import TradingAccount
 from app.models.trading_strategy import StrategyBacktestRun, TradingStrategy, UserStrategySetting
 from app.services.trading_strategy_service import get_effective_strategy_for_user
-from app.services.binance_service import get_funding_rate_history
 from app.strategy.strategy_v57 import (
     V57ConfigOverride,
     backtest,
@@ -299,18 +298,12 @@ def _execute_strategy_backtest(db: Session, run: StrategyBacktestRun) -> None:
     }
     db.commit()
 
-    # 서버 백테스트는 공식 과거 펀딩비를 포함한다. 조회 실패를 0원으로 숨기지 않는다.
-    funding_rates = get_funding_rate_history(
-        run.symbol,
-        int(pd.Timestamp(raw_df['timestamp'].min()).timestamp() * 1000),
-        int(pd.Timestamp(raw_df['timestamp'].max()).timestamp() * 1000),
-    )
     diagnostics_buffer = io.StringIO()
     with contextlib.redirect_stdout(diagnostics_buffer):
         with V57ConfigOverride(run.config_snapshot or {}):
             df_1h, df_15m = prepare_data(raw_df)
             signal_events = build_signal_events(df_1h, df_15m)
-            equity_df, trades_df = backtest(df_15m, signal_events, funding_rates=funding_rates)
+            equity_df, trades_df = backtest(df_15m, signal_events)
             stats = calculate_stats(trades_df, equity_df)
 
     if equity_df is None or equity_df.empty:
@@ -325,8 +318,8 @@ def _execute_strategy_backtest(db: Session, run: StrategyBacktestRun) -> None:
         "max_candles": max_candles,
         "progress_message": "완료",
         "engine_revision": "2026-11-24-causal",
-        "funding_included": True,
-        "funding_payment_count": len(funding_rates),
+        "funding_included": False,
+        "funding_payment_count": 0,
         "position_limit": 1,
         "execution_model": "15분 OHLC, 동일 봉 손절 우선, 다음 봉 추적 손절 적용",
         "limitations": ["실제 체결 및 청산 엔진의 재현이 아닌 근사치", "봉 내부 가격 순서 미확인"],
