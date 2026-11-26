@@ -1,0 +1,150 @@
+{
+  "sha256": "2b22376693085fd3af8099c807b86530697a729f22e5edee650cd39ca3a5ff81",
+  "selected": "V35-45",
+  "ranking": [
+    {
+      "name": "V35-45",
+      "hits": 17,
+      "min": 2.0962954968779806,
+      "median": 2.179873407602202,
+      "max_mdd": 26.685284480050985,
+      "max_annual_orders": 2.6,
+      "eligible": true
+    },
+    {
+      "name": "V50-45",
+      "hits": 17,
+      "min": 2.0914455929612985,
+      "median": 2.174829891576049,
+      "max_mdd": 27.560944640310836,
+      "max_annual_orders": 2.6,
+      "eligible": true
+    },
+    {
+      "name": "D45Q",
+      "hits": 16,
+      "min": 1.9971830928485443,
+      "median": 2.0768117193094584,
+      "max_mdd": 26.31008709812829,
+      "max_annual_orders": 2.4,
+      "eligible": true
+    },
+    {
+      "name": "T70-10",
+      "hits": 17,
+      "min": 2.551368769377445,
+      "median": 2.661499293433145,
+      "max_mdd": 62.912812056645826,
+      "max_annual_orders": 1.6,
+      "eligible": false
+    },
+    {
+      "name": "D75Q",
+      "hits": 17,
+      "min": 2.525509926429266,
+      "median": 2.7046133380581288,
+      "max_mdd": 42.58589696425391,
+      "max_annual_orders": 2.4,
+      "eligible": false
+    },
+    {
+      "name": "V50-60",
+      "hits": 17,
+      "min": 2.4284724651455845,
+      "median": 2.5618138683379237,
+      "max_mdd": 35.01044142051358,
+      "max_annual_orders": 2.6,
+      "eligible": false
+    },
+    {
+      "name": "T70-0",
+      "hits": 17,
+      "min": 2.404760107098813,
+      "median": 2.5681730002761936,
+      "max_mdd": 64.00169492101409,
+      "max_annual_orders": 1.4,
+      "eligible": false
+    },
+    {
+      "name": "T55-10",
+      "hits": 17,
+      "min": 2.3791547407718916,
+      "median": 2.4462369745701187,
+      "max_mdd": 53.03011860562552,
+      "max_annual_orders": 1.6,
+      "eligible": false
+    },
+    {
+      "name": "D60Q",
+      "hits": 17,
+      "min": 2.2849869401692318,
+      "median": 2.4104474837794165,
+      "max_mdd": 34.56647440992467,
+      "max_annual_orders": 2.4,
+      "eligible": false
+    },
+    {
+      "name": "T55-0",
+      "hits": 17,
+      "min": 2.2424084315214596,
+      "median": 2.3604364800938606,
+      "max_mdd": 54.40929597534836,
+      "max_annual_orders": 1.4,
+      "eligible": false
+    },
+    {
+      "name": "V35-60",
+      "hits": 17,
+      "min": 2.215835834327427,
+      "median": 2.3480438211139174,
+      "max_mdd": 34.566892041997335,
+      "max_annual_orders": 2.6,
+      "eligible": false
+    },
+    {
+      "name": "D75M",
+      "hits": 17,
+      "min": 2.1834860328822883,
+      "median": 2.3432296993437105,
+      "max_mdd": 63.25087394632958,
+      "max_annual_orders": 2.2,
+      "eligible": false
+    },
+    {
+      "name": "T40-10",
+      "hits": 17,
+      "min": 2.1297898674384137,
+      "median": 2.162258376346212,
+      "max_mdd": 45.49797239992669,
+      "max_annual_orders": 1.6,
+      "eligible": false
+    },
+    {
+      "name": "D60M",
+      "hits": 17,
+      "min": 2.0465734383233487,
+      "median": 2.1646459700026,
+      "max_mdd": 54.2076695485773,
+      "max_annual_orders": 2.2,
+      "eligible": false
+    },
+    {
+      "name": "T40-0",
+      "hits": 17,
+      "min": 2.0104558618545174,
+      "median": 2.086336400663084,
+      "max_mdd": 45.49779722903962,
+      "max_annual_orders": 1.4,
+      "eligible": false
+    },
+    {
+      "name": "D45M",
+      "hits": 2,
+      "min": 1.8626557092828007,
+      "median": 1.9421183418114867,
+      "max_mdd": 45.44710817729191,
+      "max_annual_orders": 2.2,
+      "eligible": false
+    }
+  ]
+}
