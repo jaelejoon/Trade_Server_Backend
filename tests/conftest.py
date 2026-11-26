@@ -22,8 +22,28 @@ os.environ['BINANCE_TESTNET'] = 'true'
 os.environ.pop('BINANCE_SPOT_BASE_URL', None)
 
 
+@pytest.fixture
+def allow_spot_testnet_reads(monkeypatch):
+    from urllib.parse import urlsplit
+
+    send = requests.Session.send
+
+    def testnet_read_only(session, request, **kwargs):
+        url = urlsplit(request.url)
+        if ((url.scheme, url.netloc) != ("https", "testnet.binance.vision")
+                or request.method != "GET"
+                or url.path not in {"/api/v3/account", "/api/v3/openOrderList"}):
+            pytest.fail("Only Spot Testnet read requests are allowed")
+        return send(session, request, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "send", testnet_read_only)
+
+
 @pytest.fixture(autouse=True)
-def block_exchange_http(monkeypatch):
+def block_exchange_http(monkeypatch, request):
+    if "allow_spot_testnet_reads" in request.fixturenames:
+        return
+
     def reject_http(*args, **kwargs):
         pytest.fail('Unexpected outbound HTTP in a local test')
 
