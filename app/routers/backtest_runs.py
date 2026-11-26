@@ -84,6 +84,8 @@ class RunRequest(BaseModel):
         strategy = STRATEGIES.get(self.strategy_id)
         if strategy is None or strategy.version != self.strategy_version:
             raise ValueError("지원하지 않는 전략 또는 전략 버전입니다.")
+        if strategy.loss_limits is not None and self.leverage != 1:
+            raise ValueError("1배 전용 전략은 레버리지 1만 허용합니다.")
         return self
 
 
@@ -145,6 +147,7 @@ def simulate(db, user_id, body):
     result = replay(
         candles.loc[start:], strategy.signals(candles), body.initial_equity_usdt,
         body.leverage, body.fee_bps, body.slippage_bps, funding,
+        loss_limits=strategy.loss_limits,
     )
     funding_hash = sha256(repr(sorted(funding.items())).encode()).hexdigest() if funding else None
     return {
