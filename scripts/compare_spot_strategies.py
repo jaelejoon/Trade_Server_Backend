@@ -30,13 +30,14 @@ def load_spot(directory):
     candles.index = pd.to_datetime(times, unit="ms")
     prices = candles[["open", "high", "low", "close"]]
     if (not candles.index.is_unique or not candles.index.is_monotonic_increasing
-            or not candles.index.equals(candles.index.floor("min"))
             or candles.index[-1] >= END or not np.isfinite(candles.to_numpy()).all()
             or (prices <= 0).any().any() or (candles.volume < 0).any()
             or (candles.high < prices.max(axis=1)).any()
             or (candles.low > prices.min(axis=1)).any()):
         raise ValueError("현물 분봉 데이터가 유효하지 않습니다.")
-    return candles
+    # Old archives contain shifted 60-second bars. Their opens are not minute-boundary fills.
+    aligned = candles.index == candles.index.floor("min")
+    return candles.loc[aligned], int((~aligned).sum())
 
 
 def evaluate(window):
@@ -88,10 +89,11 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
     global DATA
-    DATA = load_spot(args.directory)
+    DATA, discarded = load_spot(args.directory)
     minutes = int((END - DATA.index[0]) / pd.Timedelta(minutes=1))
     print(json.dumps({"first": str(DATA.index[0]), "last": str(DATA.index[-1]),
-                      "candles": len(DATA), "missing_minutes": minutes - len(DATA)}), flush=True)
+                      "candles": len(DATA), "missing_minutes": minutes - len(DATA),
+                      "discarded_off_minute": discarded}), flush=True)
     for name, strategy in STRATEGIES.items():
         if strategy.regime:
             EVENTS[name] = (strategy, strategy.regime.decisions(DATA))
