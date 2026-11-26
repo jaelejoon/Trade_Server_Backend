@@ -7,14 +7,13 @@ from typing import Literal
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import BigInteger, Column, DateTime, Integer, MetaData, Table, Text
 from sqlalchemy import func, insert, select, text, update
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from app.core.config import BACKTEST_MAX_RUNNING_GLOBAL, BACKTEST_MAX_RUNNING_PER_USER
 from app.core.jwt import get_current_user
 from app.db.session import SessionLocal, get_db
+from app.models.backtest_run import backtest_runs as runs
 from app.models.candle import Candle1m
 from app.models.user import User
 from app.services.backtest_engine import (
@@ -32,18 +31,6 @@ from app.services.binance_service import binance_public_get
 router = APIRouter(prefix="/runs")
 logger = logging.getLogger(__name__)
 ACTIVE = ("queued", "running")
-# Separate metadata keeps this table outside startup create_all.
-runs = Table(
-    "backtest_runs", MetaData(),
-    Column("id", BigInteger, primary_key=True),
-    Column("user_id", Integer),
-    Column("status", Text),
-    Column("request", JSONB),
-    Column("result", JSONB),
-    Column("error_message", Text),
-    Column("created_at", DateTime(timezone=True)),
-    Column("updated_at", DateTime(timezone=True)),
-)
 RUN_FIELDS = [column for column in runs.c if column.name not in {"user_id", "result"}]
 
 

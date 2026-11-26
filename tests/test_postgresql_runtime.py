@@ -1,12 +1,17 @@
 import os
+import runpy
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 
 @pytest.mark.skipif(not os.environ.get('TEST_DATABASE_URL'), reason='별도 PostgreSQL TEST_DATABASE_URL이 필요합니다. 운영 DB를 사용하지 마세요.')
 def test_runtime_state_round_trip_and_migration(monkeypatch):
+    from app.core.jwt import get_current_user
     from app.db.base import Base
     from app.db.database import engine
     from app.db.migrations import ensure_runtime_schema
@@ -20,9 +25,56 @@ def test_runtime_state_round_trip_and_migration(monkeypatch):
         count = connection.execute(text("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")).scalar()
         assert count == 0, '빈 전용 테스트 DB에서만 실행할 수 있습니다.'
     try:
-        Base.metadata.create_all(engine)
+        first_app = runpy.run_module('app.main')['app']
+        with TestClient(first_app) as client:
+            assert client.get('/').status_code == 200
+        with engine.begin() as connection:
+            connection.execute(User.__table__.insert().values(
+                id=9001, email='backtest@example.invalid', password_hash='test-only',
+            ))
+            run_id = connection.execute(text("""
+                INSERT INTO backtest_runs (user_id, status, request)
+                VALUES (9001, 'succeeded', '{}') RETURNING id
+            """)).scalar_one()
+            relation_ids = text("""
+                SELECT 'backtest_runs'::regclass::oid,
+                       'backtest_runs_user_history_idx'::regclass::oid
+            """)
+            original_ids = connection.execute(relation_ids).one()
+            connection.execute(text("DROP INDEX backtest_runs_active_idx"))
+        restarted_app = runpy.run_module('app.main')['app']
         ensure_runtime_schema()
-        ensure_runtime_schema()
+        with engine.begin() as connection:
+            assert connection.execute(relation_ids).one() == original_ids
+            assert connection.execute(text("SELECT 'backtest_runs_active_idx'::regclass::oid")).scalar_one()
+            migration = Path("migrations/001_backtest_runs.sql").read_text()
+            connection.exec_driver_sql(migration)
+            connection.exec_driver_sql(migration)
+            assert connection.execute(
+                text("SELECT user_id, status FROM backtest_runs WHERE id = :id"), {"id": run_id},
+            ).one() == (9001, 'succeeded')
+            connection.execute(text("""
+                INSERT INTO candles_1m (user_id, symbol, open_time, open, high, low, close, volume)
+                SELECT 9001, 'BTCUSDT', candle_time, 100, 100, 100, 100, 1
+                FROM generate_series(timestamp '2026-01-01' - interval '800 hours',
+                                     timestamp '2026-01-01 00:01', interval '1 minute') AS candle_time
+            """))
+        restarted_app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=9001)
+        with TestClient(restarted_app) as client:
+            assert client.get('/').status_code == 200
+            assert client.get('/backtests/runs').json()['items'][0]['id'] == run_id
+            response = client.post('/backtests/runs', json={
+                'strategy_id': 'V57_LONG_SAFE_PUSH',
+                'start': '2026-01-01T00:00:00Z',
+                'end': '2026-01-01T00:02:00Z',
+                'initial_equity_usdt': 1000,
+                'funding': 'disabled',
+            })
+            assert response.status_code == 202
+            created_id = response.json()['id']
+            detail = client.get(f'/backtests/runs/{created_id}').json()
+            assert detail['status'] == 'succeeded'
+            assert client.get('/backtests/runs').json()['items'][0]['id'] == created_id
         with Session(engine) as session:
             user = User(email='isolated-test@example.invalid', password_hash='test-only')
             session.add(user)

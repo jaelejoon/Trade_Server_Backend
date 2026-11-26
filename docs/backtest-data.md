@@ -153,8 +153,9 @@ python -m pytest -q tests/test_backtest_data.py
 보존하며, 사용자별·전체 한도는 기존 한도 설정을 참조하되 새 실행끼리 집계한다.
 15분 넘게 대기 중이거나 실행 중인 작업은 다음 API 요청 때 실패로 정리한다.
 프로세스 종료 시 중단된 작업의 자동 재개는 지원하지 않는다.
-테이블은 `migrations/001_backtest_runs.sql`의 별도 승인·적용 후 사용할 수 있다.
-앱 시작 과정에서 자동 생성하지 않는다.
+앱 시작 시 `create_all`이 테이블을 보장하고, `ensure_runtime_schema`가
+기존 테이블에 빠진 인덱스만 생성한다. 수동 SQL인
+`migrations/001_backtest_runs.sql`도 같은 DB에서 반복 실행할 수 있다.
 
 ### 신호와 체결
 
