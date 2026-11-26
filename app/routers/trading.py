@@ -22,6 +22,8 @@ from app.services.binance_service import get_decrypted_api_keys
 from app.services.bot_service import execute_bot_tick
 
 from app.services.spot_service import SpotExchange
+from app.services.spot_recovery_service import inspect_recovery
+from app.services.error_log_service import create_error_log
 
 router = APIRouter(tags=["trading"])
 
@@ -254,7 +256,16 @@ def reconcile_trading_account(
     api_key, secret_key = get_decrypted_api_keys(api_key_item)
 
     exchange = SpotExchange(api_key, secret_key)
-    return {"balances": exchange.account()["balances"], "open_order_lists": exchange.open_order_lists()}
+    recovery, orders = inspect_recovery(db, account.id, exchange)
+    if recovery["halt"]:
+        account.is_running = False
+        stop_account_job(account.id)
+    if recovery["alert"]:
+        create_error_log(
+            db, "spot_recovery", recovery["alert"], user_id=account.user_id,
+            trading_account_id=account.id, level="WARNING",
+        )
+    return {"recovery": recovery, "open_order_lists": orders}
 
 
 @router.get('/trading/accounts/{trading_account_id}/portfolio')

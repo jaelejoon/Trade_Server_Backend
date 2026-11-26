@@ -64,13 +64,13 @@ def postgres_client(client):
     try:
         with engine.connect() as connection:
             connection.execute(text("""
-                CREATE TEMP TABLE candles_1m (
+                CREATE TEMP TABLE spot_candles_1m (
                     user_id integer, symbol text, open_time timestamp,
                     open float8, high float8, low float8, close float8, volume float8
                 )
             """))
             connection.execute(text("""
-                INSERT INTO candles_1m VALUES
+                INSERT INTO spot_candles_1m VALUES
                     (:user_id, :symbol, :open_time, :price, :price + 2,
                      :price - 2, :price + 1, 2)
             """), [

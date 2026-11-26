@@ -10,6 +10,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.login_attempt import LoginAttempt
 from app.models.latest_signal_state import LatestSignalState
 from app.models.app_setting import AppSetting
+from app.models.spot_fill import SpotFill
 
 __all__ = [
     'User',
@@ -24,4 +25,5 @@ __all__ = [
     'LoginAttempt',
     'LatestSignalState',
     'AppSetting',
+    'SpotFill',
 ]

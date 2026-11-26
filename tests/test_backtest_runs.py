@@ -146,11 +146,11 @@ def test_run_lifecycle_postgresql(monkeypatch):
                 conn.execute(text("INSERT INTO users VALUES (1), (2)"))
                 migration = Path("migrations/001_backtest_runs.sql").read_text()
                 conn.exec_driver_sql(migration.replace("CREATE TABLE", "CREATE TEMP TABLE", 1))
-                conn.execute(text("""CREATE TEMP TABLE candles_1m (
+                conn.execute(text("""CREATE TEMP TABLE spot_candles_1m (
                     user_id integer, symbol text, open_time timestamp,
                     open float, high float, low float, close float, volume float
                 )"""))
-                conn.execute(text("""INSERT INTO candles_1m
+                conn.execute(text("""INSERT INTO spot_candles_1m
                     SELECT 1, 'BTCUSDT', time, 100, 100, 100, 100, 1
                     FROM generate_series(timestamp '2026-01-01' - interval '800 hours',
                                          timestamp '2026-01-01 00:01', interval '1 minute') AS time
