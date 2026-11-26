@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.jwt import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.routers import backtest_data
+from app.routers import backtest_data, backtest_runs
 from app.schemas import StrategyBacktestRunRequest
 from app.services.strategy_backtest_service import (
     create_strategy_backtest_job,
@@ -16,6 +16,7 @@ from app.services.strategy_backtest_service import (
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 router.include_router(backtest_data.router)
+router.include_router(backtest_runs.router)
 
 
 @router.post("/run")

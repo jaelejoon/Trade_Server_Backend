@@ -453,8 +453,11 @@ def prepare_data(raw_df):
     print(df["timestamp"].min(), "~", df["timestamp"].max())
     print(f"정렬/중복제거 후 데이터 수: {len(df)}")
 
-    df = df.set_index("timestamp")
+    return prepare_closed_candles(df.set_index("timestamp"), diagnostics=True)
 
+
+def prepare_closed_candles(df, *, diagnostics=False):
+    """Build V57 features from sorted, UTC-indexed closed one-minute candles."""
     df_15m = resample_ohlcv(df, "15min")
     df_1h = resample_ohlcv(df, "1h")
     df_4h = resample_ohlcv(df, "4h")
@@ -633,7 +636,8 @@ def prepare_data(raw_df):
     df_15m["signal_strategy_15m"] = "NONE"
     df_15m["entry_signal_15m"] = False
 
-    print_signal_diagnostics(df_1h, df_15m, df_4h)
+    if diagnostics:
+        print_signal_diagnostics(df_1h, df_15m, df_4h)
 
     return df_1h.dropna(), df_15m.dropna()
 
