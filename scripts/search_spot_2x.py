@@ -148,14 +148,15 @@ def run(directory, phase, selection_path):
         for name in CANDIDATES:
             rows = [r["metrics"][str(fees[0])][name] for r in rolling]
             multiples = [r["multiple"] for r in rows]
-            ranking.append({"candidate": name, "hits": sum(m >= 2 for m in multiples),
+            ranking.append({"candidate": name, "hits": sum(bool(m >= 2) for m in multiples),
                             "min": min(multiples), "median": median(multiples),
                             "eligible": all(r["annual_orders"] <= 4 for r in rows)})
         ranking.sort(key=lambda r: (r["eligible"], r["hits"], r["min"], r["median"]), reverse=True)
         output = {"script_sha256": digest, "selected": ranking[0]["candidate"] if ranking[0]["eligible"] else None,
                   "ranking": ranking, "rolling": rolling}
+        serialized = json.dumps(output, allow_nan=False, indent=2)
         with selection_path.open("x") as file:
-            json.dump(output, file, allow_nan=False, indent=2)
+            file.write(serialized)
         return {k: v for k, v in output.items() if k != "rolling"}
     assert len(rolling) == 51
     for before, after in zip(selection["rolling"], rolling, strict=False):
