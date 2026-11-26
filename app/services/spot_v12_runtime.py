@@ -122,21 +122,25 @@ def _finish_testnet(db, account, state, exchange, *, submit):
     stored = state.runtime_state["v12_wa"]
     decision = stored["decision"]
     execution = dict(decision["execution"])
-    try:
-        if not submit:
-            order = exchange.lookup(execution["client_id"])
-        elif execution["side"] == "BUY":
-            order = exchange.market_buy_quote(Decimal(execution["quote"]), execution["client_id"])
-        else:
-            order = exchange.order("SELL", Decimal(execution["quantity"]), execution["client_id"])
-        if order is None or not SpotLifecycle(db, account, state, exchange).ingest(order, execution["side"]):
-            raise ValueError("체결 확인 필요")
-        execution["status"] = "confirmed"
-        execution["exchange_status"] = order["status"]
-    except Exception:
-        db.rollback()
-        account.is_running = False
-        execution["status"] = "unconfirmed"
+    expiry = datetime.combine(date.fromisoformat(decision["boundary"]), time.min, tzinfo=timezone.utc)
+    if submit and datetime.now(timezone.utc) >= expiry + timedelta(minutes=5):
+        execution["status"] = "expired"
+    else:
+        try:
+            if not submit:
+                order = exchange.lookup(execution["client_id"])
+            elif execution["side"] == "BUY":
+                order = exchange.market_buy_quote(Decimal(execution["quote"]), execution["client_id"])
+            else:
+                order = exchange.order("SELL", Decimal(execution["quantity"]), execution["client_id"])
+            if order is None or not SpotLifecycle(db, account, state, exchange).ingest(order, execution["side"]):
+                raise ValueError("체결 확인 필요")
+            execution["status"] = "confirmed"
+            execution["exchange_status"] = order["status"]
+        except Exception:
+            db.rollback()
+            account.is_running = False
+            execution["status"] = "unconfirmed"
     outcome = dict(decision, execution=execution)
     history = {**stored.get("history", {}), outcome["boundary"]: outcome}
     state.runtime_state = {**state.runtime_state,

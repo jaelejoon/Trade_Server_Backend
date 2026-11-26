@@ -126,3 +126,13 @@ def test_postgresql_daily_cutoff_ignores_open_boundary_minute():
             assert (row["close"], row["open"]) == (101, 102)
     finally:
         engine.dispose()
+
+
+def test_testnet_submission_checks_real_clock_after_planning():
+    db, exchange = Mock(), Mock()
+    account = SimpleNamespace(is_running=True)
+    decision = {"boundary": "2020-01-01", "execution": {"status": "pending", "side": "BUY", "client_id": "id"}}
+    state = SimpleNamespace(runtime_state={"v12_wa": {"decision": decision}})
+    outcome = runtime._finish_testnet(db, account, state, exchange, submit=True)
+    assert outcome["status"] == "expired" and account.is_running
+    assert not exchange.mock_calls
