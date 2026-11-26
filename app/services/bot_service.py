@@ -1,31 +1,24 @@
 from decimal import Decimal
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
-from app.core.config import BINANCE_TESTNET, DRY_RUN, ENABLE_LIVE_TRADING
+from app.core.config import ENABLE_SPOT_TESTNET_ORDERS, SPOT_TESTNET_MAX_ORDER_USDT
+from app.models.spot_fill import SpotFill
 from app.models.trading_account import TradingAccount
 from app.models.user import User
 from app.services.account_service import get_api_key_owned_by_user, get_or_create_bot_state
-from app.services.app_setting_service import get_live_trading_enabled
 from app.services.binance_service import get_decrypted_api_keys
 from app.services.spot_lifecycle import SpotLifecycle
 from app.services.spot_service import SpotExchange
-from app.services.strategy_signal_service import get_v57_signal_from_db_candles
+
+TEST_ENTRY = "spot-testnet-check"
 
 
-def is_account_live_trading_enabled(db, account):
-    if DRY_RUN or not BINANCE_TESTNET or not ENABLE_LIVE_TRADING or account.dry_run:
-        return False
-    user = db.get(User, account.user_id)
-    return bool(user and user.is_active and not user.dry_run and user.enable_live_trading
-                and get_live_trading_enabled(db))
-
-
-def execute_bot_tick(db, account, *, recover_only=False):
-    if account.market_type != "SPOT" or not is_account_live_trading_enabled(db, account):
+def execute_bot_tick(db, account, *, recover_only=False, test_entry=None):
+    if not ENABLE_SPOT_TESTNET_ORDERS or account.market_type != "SPOT":
         return {"status": "paused", "reason": "현물 테스트넷 주문 모드가 꺼져 있습니다."}
     account_id, key_id = account.id, account.api_key_id
-    # Hold a session-level lock across commits to serialize journaled requests for the same key.
+    # Keep the lock across commits for the same testnet API key.
     with db.get_bind().connect() as lock:
         params = {"key": key_id}
         if not lock.execute(text("SELECT pg_try_advisory_lock(571126, :key)"), params).scalar():
@@ -33,34 +26,37 @@ def execute_bot_tick(db, account, *, recover_only=False):
         try:
             db.expire_all()
             account = db.get(TradingAccount, account_id)
-            if not account or not account.is_active or not account.is_running or not is_account_live_trading_enabled(db, account):
+            if not account or not account.is_active or account.market_type != "SPOT" or account.api_key_id != key_id:
+                return {"status": "paused"}
+            user = db.get(User, account.user_id)
+            if not user or not user.is_active or not user.is_admin:
                 return {"status": "paused"}
             key = get_api_key_owned_by_user(db, account.user_id, key_id)
             state = get_or_create_bot_state(db, account.id)
             lifecycle = SpotLifecycle(db, account, state, SpotExchange(*get_decrypted_api_keys(key)))
             try:
-                result = lifecycle.advance()
-                if recover_only or result["status"] != "flat":
+                if test_entry is None:
+                    if not account.is_running or lifecycle.journal.get("signal_time") != TEST_ENTRY:
+                        return {"status": "paused"}
+                    result = lifecycle.advance()
+                    if result["status"] == "flat":
+                        account.is_running = False
+                        db.commit()
                     return result
-                signal_result = get_v57_signal_from_db_candles(
-                    db, account.user_id, account.symbol, trading_account_id=account.id,
-                )
-                signal = signal_result.get("signal")
-                if signal is None:
-                    return {"status": "no_signal", "reason": "닫힌 현물 봉 확인 필요"}
-                if not signal["has_signal"] or signal["signal_time"] == lifecycle.journal.get("signal_time"):
-                    return {"status": "no_signal"}
+                if recover_only or account.is_running or lifecycle.journal or db.scalar(
+                    select(SpotFill.trade_id).where(SpotFill.trading_account_id == account_id).limit(1)
+                ) is not None:
+                    return {"status": "blocked", "reason": "주문 검증은 새 검증 계좌에서 한 번만 가능합니다."}
+                if lifecycle.exchange.open_order_lists():
+                    return {"status": "blocked", "reason": "테스트넷 계정에 열린 보호주문이 있습니다."}
                 price = lifecycle.exchange.price()
-                gap = Decimal(str(signal["atr"])) * Decimal(str(signal["stop_atr_mult"]))
-                balance = next((Decimal(row["free"]) for row in lifecycle.exchange.account()["balances"]
-                                if row["asset"] == "USDT"), Decimal(0))
-                risk = min(Decimal(str(signal["risk_per_trade"])), Decimal(str(account.max_risk_ratio)))
-                cap = min(Decimal(str(signal["max_position_ratio"])), Decimal("0.99"))
-                if not 0 < gap < price or balance <= 0 or risk <= 0 or cap <= 0:
-                    return {"status": "no_order"}
-                quantity = min(balance * risk / gap, balance * cap / price)
-                target = price + gap * Decimal(str(signal["take_profit_r"]))
-                return lifecycle.entry(signal["signal_time"], quantity, price - gap, target)
+                stop = price * Decimal("0.99")
+                target = price * Decimal("1.01")
+                if test_entry == "reject_oco":
+                    # Exercise the verified-inventory fallback without sending an invalid OCO.
+                    stop = target
+                account.is_running = True
+                return lifecycle.entry(TEST_ENTRY, SPOT_TESTNET_MAX_ORDER_USDT, stop, target, quote=True)
             except Exception:
                 db.rollback()
                 return lifecycle.halt("현물 체결 또는 주문 상태 확인 실패. 자동 실행 중지.")

@@ -1,4 +1,6 @@
 import os
+import socket
+from decimal import Decimal, InvalidOperation
 
 from dotenv import load_dotenv
 
@@ -123,15 +125,50 @@ MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", "1048576"))
 # Binance
 # =========================
 
+SPOT_TESTNET_URL = "https://testnet.binance.vision"
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 
-_expected_spot_url = "https://testnet.binance.vision" if BINANCE_TESTNET else "https://api.binance.com"
+_expected_spot_url = SPOT_TESTNET_URL if BINANCE_TESTNET else "https://api.binance.com"
 BINANCE_SPOT_BASE_URL = os.getenv("BINANCE_SPOT_BASE_URL", _expected_spot_url).rstrip("/")
 if BINANCE_SPOT_BASE_URL != _expected_spot_url:
     raise RuntimeError("Binance 현물 URL이 선택한 거래 환경과 일치하지 않습니다.")
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
+_spot_order_flag = os.getenv("ENABLE_SPOT_TESTNET_ORDERS", "false")
+if _spot_order_flag not in {"false", "true"}:
+    raise RuntimeError("현물 테스트넷 주문 플래그가 올바르지 않습니다.")
+
+try:
+    SPOT_TESTNET_MAX_ORDER_USDT = Decimal(os.getenv("SPOT_TESTNET_MAX_ORDER_USDT", "12"))
+    if (not SPOT_TESTNET_MAX_ORDER_USDT.is_finite()
+            or not 0 < SPOT_TESTNET_MAX_ORDER_USDT <= 20
+            or SPOT_TESTNET_MAX_ORDER_USDT.as_tuple().exponent < -2):
+        raise ValueError
+except (InvalidOperation, ValueError):
+    raise RuntimeError("현물 테스트넷 주문 상한은 0 초과 20 USDT 이하, 소수 둘째 자리까지입니다.") from None
+
+ENABLE_SPOT_TESTNET_ORDERS = _spot_order_flag == "true"
+if ENABLE_SPOT_TESTNET_ORDERS:
+    from sqlalchemy.engine import make_url
+
+    try:
+        database = make_url(DATABASE_URL)
+    except Exception:
+        raise RuntimeError("검증 DB 주소 형식이 올바르지 않습니다.") from None
+    if not (
+        ENVIRONMENT == "staging"
+        and socket.gethostname() == "trade-staging-api"
+        and database.drivername == "postgresql+psycopg2"
+        and database.host == "staging-db" and database.port == 5432
+        and database.username == database.database == "trade_staging"
+        and not database.query
+        and BINANCE_TESTNET
+        and os.getenv("BINANCE_SPOT_BASE_URL") == SPOT_TESTNET_URL
+        and not os.environ.get("BINANCE_FUTURES_BASE_URL")
+        and DRY_RUN and not ENABLE_LIVE_TRADING
+    ):
+        raise RuntimeError("현물 테스트넷 주문은 전용 검증 서버에서만 허용됩니다.")
 
 # =========================
 # 캔들 / 전략

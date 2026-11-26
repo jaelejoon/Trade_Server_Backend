@@ -52,10 +52,11 @@ class SpotLifecycle:
             self.db.commit()
         return order["status"] in TERMINAL
 
-    def entry(self, signal_time, quantity, stop, target):
+    def entry(self, signal_time, quantity, stop, target, *, quote=False):
         order_id = f"spot-buy-{uuid4().hex[:24]}"
         self.save(buy=order_id, signal_time=signal_time, stop=str(stop), target=str(target))
-        order = self.exchange.order("BUY", quantity, order_id)
+        order = (self.exchange.market_buy_quote(quantity, order_id) if quote
+                 else self.exchange.order("BUY", quantity, order_id))
         return self.advance(buy_response=order)
 
     def protect(self, quantity):

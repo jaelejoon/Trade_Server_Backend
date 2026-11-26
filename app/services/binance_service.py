@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import logging
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Literal, Optional
 from urllib.parse import urlencode
 
@@ -15,8 +16,9 @@ from app.core.config import (
     BINANCE_SPOT_BASE_URL,
     BINANCE_TESTNET,
     SERVER_TIME_DRIFT_LIMIT_MS,
-    DRY_RUN,
-    ENABLE_LIVE_TRADING,
+    ENABLE_SPOT_TESTNET_ORDERS,
+    SPOT_TESTNET_MAX_ORDER_USDT,
+    SPOT_TESTNET_URL,
 )
 from app.core.security import decrypt_text
 from app.models.binance_api_key import BinanceApiKey
@@ -89,10 +91,24 @@ def binance_signed_request(
         raise HTTPException(status_code=403, detail="현물 요청 경로가 허용되지 않습니다.")
     params = params or {}
     if method != "GET":
-        if DRY_RUN or not ENABLE_LIVE_TRADING or not BINANCE_TESTNET:
+        if not ENABLE_SPOT_TESTNET_ORDERS or not BINANCE_TESTNET or base_url != SPOT_TESTNET_URL:
             raise HTTPException(status_code=403, detail="현물 쓰기 요청이 허용되지 않습니다.")
         if params.get("symbol") != "BTCUSDT":
             raise HTTPException(status_code=400, detail="BTCUSDT만 주문할 수 있습니다.")
+        if params.get("side") == "BUY":
+            try:
+                quote = Decimal(str(params.get("quoteOrderQty")))
+                allowed = (
+                    path == "/api/v3/order" and params.get("type") == "MARKET"
+                    and "quantity" not in params and "price" not in params
+                    and quote.is_finite() and 0 < quote <= SPOT_TESTNET_MAX_ORDER_USDT
+                )
+            except InvalidOperation:
+                allowed = False
+            if not allowed:
+                raise HTTPException(status_code=400, detail="검증 매수 금액 또는 주문 방식이 허용 범위를 벗어났습니다.")
+        elif params.get("side") != "SELL":
+            raise HTTPException(status_code=400, detail="검증 주문 방향이 올바르지 않습니다.")
 
     for attempt in range(BINANCE_MAX_RETRIES):
         request_params = dict(params)

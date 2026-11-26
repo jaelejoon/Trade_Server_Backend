@@ -64,6 +64,7 @@ def report_flags(values, heading):
         "BINANCE_SPOT_BASE_URL": lambda v: v.rstrip("/") == SPOT_PRODUCTION,
         "DRY_RUN": lambda v: v.lower() == "true",
         "ENABLE_LIVE_TRADING": lambda v: v.lower() == "false",
+        "ENABLE_SPOT_TESTNET_ORDERS": lambda v: v == "false",
         "ENABLE_TRADING_SCHEDULER": lambda v: v.lower() == "false",
         "ENVIRONMENT": None,
         "REQUIRE_HTTPS_AUTH": lambda v: v.lower() == "true",

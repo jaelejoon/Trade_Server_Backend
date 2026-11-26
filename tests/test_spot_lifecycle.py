@@ -53,6 +53,19 @@ def test_entry_and_oco_exit(setup, exit_type):
     assert persist.call_count == 2
 
 
+def test_testnet_entry_submits_quote_and_protects_bot_quantity(setup):
+    bot, exchange, _, _, persist = setup
+    exchange.market_buy_quote.return_value = order("BUY", ".020")
+    exchange.trades.return_value = [{"qty": ".020", "isBuyer": True}]
+
+    assert bot.entry("spot-testnet-check", Decimal("12"), "90", "120", quote=True)["status"] == "protected"
+
+    assert exchange.market_buy_quote.call_args.args[0] == Decimal("12")
+    exchange.order.assert_not_called()
+    assert exchange.protect.call_args.args[:3] == (Decimal(".019"), "90", "120")
+    persist.assert_called_once()
+
+
 def test_rejected_oco_sells_only_bot_quantity_then_stops(setup):
     bot, exchange, _, _, persist = setup
     exchange.protect.side_effect = HTTPException(400)

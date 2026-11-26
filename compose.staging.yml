@@ -4,6 +4,7 @@ services:
   staging-api:
     image: trade-staging-api:${STAGING_BACKEND_SHA:?후보 SHA가 필요합니다}
     container_name: trade-staging-api
+    hostname: trade-staging-api
     environment:
       ENVIRONMENT: staging
       DATABASE_URL: postgresql+psycopg2://trade_staging:${STAGING_DB_PASSWORD:?검증 DB 비밀번호가 필요합니다}@staging-db:5432/trade_staging
@@ -13,6 +14,8 @@ services:
       BINANCE_SPOT_BASE_URL: https://testnet.binance.vision
       DRY_RUN: "true"
       ENABLE_LIVE_TRADING: "false"
+      ENABLE_SPOT_TESTNET_ORDERS: ${STAGING_ENABLE_SPOT_TESTNET_ORDERS:-false}
+      SPOT_TESTNET_MAX_ORDER_USDT: ${STAGING_SPOT_TESTNET_MAX_ORDER_USDT:-12}
       ENABLE_TRADING_SCHEDULER: ${STAGING_ENABLE_TRADING_SCHEDULER:-false}
       REQUIRE_HTTPS_AUTH: "true"
       TRUST_PROXY_HEADERS: "true"

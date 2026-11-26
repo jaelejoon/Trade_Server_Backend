@@ -49,7 +49,7 @@ Docker와 Compose v2가 설치되어 있고 현재 계정에서 Docker를 사용
 umask 077
 mkdir -p "$HOME/trade-staging"
 cd "$HOME/trade-staging"
-git clone --branch feature/2026-11-26-spot-staging https://github.com/jaelejoon/Trade_Server_Backend.git config
+git clone --branch feature/2026-11-27-spot-testnet-orders https://github.com/jaelejoon/Trade_Server_Backend.git config
 git clone https://github.com/jaelejoon/Trade_Server_Backend.git backend
 git clone https://github.com/jaelejoon/Trade_Server_Frontend.git frontend
 mkdir -p config/staging-dist
@@ -70,13 +70,13 @@ Tailscale 관리자 화면에서 MagicDNS와 HTTPS 인증서를 켜고, 전용 �
 
 ### 2. 검증 후보 지정 및 빌드 · 약 10–20분
 
-백엔드 PR #10이 포함된 검토 완료 SHA와 호환되는 프런트 SHA를
+이 테스트넷 주문 검증 변경이 포함된 검토 완료 SHA와 호환되는 프런트 SHA를
 아래 명령의 자리표시에 넣습니다. 브랜치 예시는 백엔드
-`feature/2026-11-26-spot`입니다. 프런트는 PR #5의 검토된 커밋을 사용합니다. 각각 SHA가 확인되지 않으면 빌드하지 않습니다.
+`feature/2026-11-27-spot-testnet-orders`입니다. 프런트는 PR #5의 검토된 커밋을 사용합니다. 각각 SHA가 확인되지 않으면 빌드하지 않습니다.
 
 ```bash
 cd "$HOME/trade-staging"
-git -C backend fetch origin feature/2026-11-26-spot
+git -C backend fetch origin feature/2026-11-27-spot-testnet-orders
 git -C backend switch --detach '<승인된 백엔드 전체 SHA>'
 git -C frontend fetch origin feature/2026-11-26-spot-ui
 git -C frontend switch --detach '<승인된 프런트 전체 SHA>'
@@ -114,6 +114,7 @@ cd "$HOME/trade-staging"
 staging_compose() {
   env -u STAGING_BACKEND_SHA -u STAGING_DB_PASSWORD -u STAGING_JWT_SECRET_KEY \
     -u STAGING_ENCRYPTION_KEY -u STAGING_TS_AUTHKEY -u STAGING_ENABLE_TRADING_SCHEDULER \
+    -u STAGING_ENABLE_SPOT_TESTNET_ORDERS -u STAGING_SPOT_TESTNET_MAX_ORDER_USDT \
     docker compose --env-file "$HOME/trade-staging/.env.staging" \
     -f "$HOME/trade-staging/config/compose.staging.yml" "$@"
 }
@@ -138,8 +139,8 @@ Serve가 표시한 HTTPS 주소를 Tailscale에 로그인한 PC에서 엽니다.
 허용되지 않은 기기에서도 접근 차단을 확인합니다.
 
 PR #10의 `app/core/config.py`는 테스트넷 모드에서 다른 현물 URL을
-거부합니다. Compose와 시작 래퍼는 현물 테스트넷 URL, 모의 실행,
-거래소 쓰기 비활성화를 강제합니다. 운영 백업이나 운영 API 키를 복사하지 않습니다.
+거부합니다. Compose와 시작 래퍼는 현물 테스트넷 URL, 모의 실행과 운영 실거래 플래그 비활성화를 강제합니다.
+별도 검증 주문 플래그는 기본 꺼짐입니다. 운영 백업이나 운영 API 키를 복사하지 않습니다.
 상세 확인 항목은 [현물 테스트넷 점검](spot-testnet-check.md)을 따릅니다.
 
 ### 검증 스케줄러만 켜기 · 별도 승인 후
@@ -154,7 +155,8 @@ staging_compose up -d --no-deps --wait staging-api
 
 검증 계정으로 로그인하고 `GET /api/trading/status`의
 `scheduler_enabled=true`를 확인합니다. 모의 실행과 거래소 쓰기 비활성화는
-그대로 적용되므로 테스트넷 체결은 발생하지 않습니다. 확인 후 값을
+그대로 적용됩니다. 별도 테스트넷 주문 플래그가 꺼져 있으면 거래소 쓰기도
+차단됩니다. 확인 후 값을
 `false`로 돌리고 같은 명령으로 검증 API만 다시 올린 다음
 `scheduler_enabled=false`를 확인합니다.
 

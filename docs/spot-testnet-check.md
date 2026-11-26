@@ -4,67 +4,104 @@
 [설치 절차](staging-mini-pc.md)로 별도 검증 스택을 먼저 준비합니다.
 운영 선물 배포 순서와 기존 사전 점검 일정은 현물 전환 계획에 적용하지 않습니다.
 
-## 주문 검증의 범위
+## 1. 설치와 키 없이 확인
 
-PR #10의 `app/core/config.py`는 `BINANCE_TESTNET=true`이면
-`BINANCE_SPOT_BASE_URL=https://testnet.binance.vision`만 허용합니다.
-`app/services/binance_service.py`의 서명 요청에서 쓰기는 테스트넷이고,
-`DRY_RUN=false`와 `ENABLE_LIVE_TRADING=true`를 모두 만족해야 통과합니다.
-봇은 별도로 사용자·계정·전역 주문 설정과 실행 상태도 확인합니다.
+1. [설치 절차](staging-mini-pc.md)에 따라 이 검증 브랜치의 설정과 백엔드
+   이미지, 프런트 #5의 승인된 SHA를 사용합니다. 초기에는
+   `STAGING_ENABLE_SPOT_TESTNET_ORDERS=false`와
+   `STAGING_ENABLE_TRADING_SCHEDULER=false`를 유지합니다.
+2. Tailscale 검증 주소에서 `/api/health`가
+   `status=ok`, `dry_run=true`, `binance_testnet=true`를 반환하고
+   `/api/health/db`가 `status=ok`인지 확인합니다.
+3. 검증 관리자 계정으로 가입·로그인합니다. 새로고침 후 로그인 상태가
+   유지되고 `GET /api/me`, 세션 갱신 `POST /api/auth/refresh`가 성공해야
+   합니다. `GET /api/backtests/data/status`가 200이고 빈 검증 DB에서는
+   캔들 0건이 정상입니다. 계좌 현황의 `/api/trading/status`에서
+   `scheduler_enabled=false`, `spot_testnet_orders_enabled=false`를 확인합니다.
 
-이 검증 스택은 `DRY_RUN=true`, `ENABLE_LIVE_TRADING=false`를 고정합니다.
-따라서 실제 테스트넷 매수·OCO·매도·재시작 주문 복구는 이 스택에서
-**미검증**으로 남깁니다. 아래 주문 시나리오의 모의 테스트 결과와 실제
-테스트넷 체결 검증을 각각 기록합니다. 실제 거래소 연동 체결을 배포 합격
-기준에 포함하려면 별도의 승인된 테스트넷 전용 검증 단계가 필요합니다.
+## 2. 키 등록과 소액 주문 시나리오
 
-## 1. 웹과 읽기 경로
+1. 재준님이 **계정 설정 → API Key 등록**에서 현물 테스트넷 전용 키를 직접
+   입력합니다. 키나 자격증명을 채팅·명령·기록에 붙여넣지 않습니다.
+   같은 화면에서 새 검증 계좌를 만듭니다. 계정과 사용자의 모의 실행
+   설정은 유지합니다. **계좌 현황**의 BTC·USDT 잔고가 테스트넷과 일치하고,
+   체결은 비어 있으며 ‘봇 보호주문 없음’이 표시되어야 합니다.
+   열린 BTCUSDT 보호주문이 없는 전용 테스트넷 계정을 사용합니다.
+2. 검증 폴더의 `.env.staging`에서
+   `STAGING_ENABLE_SPOT_TESTNET_ORDERS=true`로 바꿉니다.
+   `STAGING_SPOT_TESTNET_MAX_ORDER_USDT` 기본값은 12이고 상한은 20입니다.
+   Binance의 최소 주문 금액과 보호주문 최소 수량을 먼저 확인합니다.
+   설치 문서에서 정의한 `staging_compose` 함수로 검증 API만 올립니다.
 
-1. Tailscale에서 검증 주소를 열고 아래 경로의 응답을 확인합니다.
-   `/api/health`는 `status=ok`, `dry_run=true`, `binance_testnet=true`,
-   `/api/health/db`는 `status=ok`여야 합니다. 이 단계는 Binance 키가 필요 없습니다.
-2. 검증 웹에서 검증 사용자로 가입·로그인합니다. 새로고침 후에도 로그인되고
-   브라우저 개발자 도구의 Network에서 `GET /api/me`와 세션 갱신
-   `POST /api/auth/refresh`가 성공해야 합니다. 요청 헤더·쿠키·본문은 복사하지 않습니다.
-3. 백테스트 데이터 화면을 열어 `GET /api/backtests/data/status`와
-   `GET /api/candles/1m/status/BTCUSDT`가 성공하는지 확인합니다.
-   처음에는 0건이 정상입니다. 필요할 때만 검증 DB에 짧은 현물 캔들 구간을
-   적재하고 화면에서 다시 조회합니다. 시간순·BTCUSDT·UTC 범위를 확인합니다.
-4. 재준님이 검증 웹 **계정 설정 → API Key 등록**에서 현물 테스트넷 전용 키를
-   직접 등록한 뒤 같은 화면에서 검증 계좌를 추가합니다. 계정과 사용자의 모의
-   실행 설정을 유지합니다. 등록 입력이나 키 화면은 공유하지 않습니다.
-5. **계좌 현황**에서 잔고를 조회합니다.
-   `GET /api/trading/accounts/{id}/portfolio`가 200이고 BTC·USDT 잔고가
-   같은 테스트넷 계정의 잔고와 일치해야 합니다.
-   다음 두 요청도 200이어야 합니다.
-   - `GET /api/trading/accounts/{id}/fills?limit=20`
-     새 계좌는 `items=[]`가 정상입니다.
-   - `GET /api/trading/accounts/{id}/oco`
-     새 계좌는 `oco=null`이고 화면에 ‘봇 보호주문 없음’이 표시되어야 합니다.
-6. 스케줄러는 초기 `GET /api/trading/status`의
-   `scheduler_enabled=false`와 화면의 꺼짐 표시가 일치해야 합니다.
-   승인 후 [스케줄러 확인 절차](staging-mini-pc.md)에서 상태 표시 전환만
-   확인하고 다시 끕니다. 중지 이력이 없는 새 계좌에서는 원인 미표시가
-   정상입니다. 화면에 실제 중지 사유를 표시하는 검증에는 모의 원장/API
-   응답을 사용해 원문과 표시가 일치하는지 확인합니다.
+   ```bash
+   staging_compose up -d --no-deps --wait staging-api
+   ```
 
-## 2. 주문·복구 시나리오
+   건강 상태는 그대로 `dry_run=true`입니다. 로그인한 관리자의 계좌 현황
+   API에서 `spot_testnet_orders_enabled=true`, `is_live_trading=false`를
+   확인합니다. 본 검증에서는 스케줄러를 기본 꺼짐으로 두고 주문 진행을
+   수동 확인합니다.
+3. **소액 매수와 OCO 등록.** 검증 주소의 로그인된 브라우저 개발자 도구에서
+   아래 명령의 `123`을 새 검증 계좌 ID로 바꿔 한 번 실행합니다.
+   계좌 ID는 계좌 현황의 요청 경로나 `/api/trading/accounts`에서 확인합니다.
+   코드는 현재 페이지의 세션을 사용합니다.
 
-격리된 백엔드 소스 환경에서 아래 명령을 실행합니다. 거래소 호출은
-기존 테스트의 모의 거래소로 대체되며 Binance 키가 필요 없습니다.
+   ```javascript
+   const spotCheck = async (id, action) => {
+     if (!location.hostname.startsWith("trade-staging.") || !location.hostname.endsWith(".ts.net")) {
+       throw new Error("검증 서버 주소에서만 실행하세요.");
+     }
+     const response = await fetch(`/api/trading/accounts/${id}/spot-testnet-check?action=${action}`, {
+       method: "POST",
+     });
+     console.log(response.status, await response.json());
+   };
+   await spotCheck(123, "entry");
+   ```
+
+   정상 응답은 `status=protected`입니다. 계좌 현황에서 BUY 체결, 수량·수수료,
+   봇 OCO의 상태·수량·가격이 보이고 테스트넷의 보호주문과 일치해야 합니다.
+   BUY는 12 USDT 기본 예산의 `quoteOrderQty` 시장가 요청 한 건입니다.
+   동일 계좌에서 같은 매수를 재시도하면 `blocked` 또는 동시 실행 중
+   `busy`이며 주문·원장 건수가 증가하지 않아야 합니다. 응답이 모호하면
+   새 계좌로 재시도하기 전에 테스트넷 주문 화면과 원장을 먼저 대조합니다.
+4. **재시작 복구.** OCO가 열린 상태에서 계좌 현황의 OCO ID와 주문 수를
+   기록합니다. 자동 복구를 확인할 때만 `STAGING_ENABLE_TRADING_SCHEDULER=true`
+   를 검증 파일에 지정한 뒤 설치 문서의 API 교체 명령을 실행합니다.
+   필요하면 같은 검증 스택에서 `staging_compose restart staging-api`를
+   실행합니다. API가 정상으로 돌아오고, 보호주문이 여전히 열려 있다면
+   이전 OCO ID가 유지되어야 합니다. 재시작 중 체결됐다면 해당 매도 원장이
+   한 번만 기록되어야 합니다. 어느 경우에도 새 BUY가 없어야 합니다.
+   스케줄러는 검증 중 상태 정합성 확인과 복구만 수행합니다.
+5. **익절·손절.** 가격이 한쪽 조건에 도달하면 동일 콘솔에서
+   `await spotCheck(123, "advance");`를 실행하거나 검증 스케줄러의 다음
+   확인 주기를 기다립니다. 매도 원장 기록, 반대 주문 종료, 중복 매도 없음이
+   통과 기준입니다. 익절과 손절을 각각 보려면 앞선 계좌가 종료된 후 새 계좌로
+   반복합니다. 가격이 어느 쪽에 도달할지와 시간은 보장되지 않으므로 실제로
+   관찰하지 못한 쪽은 미검증으로 남깁니다.
+6. **OCO 실패와 비상 매도.** 이전 주문이 모두 종료된 뒤 또 다른 새 검증
+   계좌에서 `await spotCheck(새_검증_계좌_ID, "reject_oco");`를 실행합니다.
+   검증용으로 동일 손절·익절 가격을 만들어 앱 내부에서 보호주문을 거절시키므로
+   거래소에 잘못된 OCO를 제출하지 않습니다. 정상 결과는 BUY 및 봇 보유분
+   SELL 기록, OCO 미등록, 계좌 중지, 계좌 현황의 중지 사유 표시입니다.
+   매도량은 원장상 봇 귀속 수량과 매도 가능 잔고 이하여야 합니다.
+   실제 거래소 OCO 거절과 응답 불명 상태는 아래 모의 테스트로 구분해 확인합니다.
+7. **종료.** 열린 주문·봇 보유분을 테스트넷과 대조합니다. 남은 주문이나
+   잔고가 있으면 테스트넷 화면에서 상태를 확인해 정리합니다.
+   `STAGING_ENABLE_SPOT_TESTNET_ORDERS=false`와
+   `STAGING_ENABLE_TRADING_SCHEDULER=false`로 되돌려 검증 API를 다시 올립니다.
+   `/api/trading/status`의 두 플래그가 모두 꺼져 있어야 합니다.
+
+매수 상한은 거래소에 전달되는 USDT 금액입니다. 보호·비상 매도는 시세가
+상승해도 검증 매수분을 정리할 수 있도록 USDT 상한 대신 확인된 봇 BTC
+수량으로 제한합니다. 시장가 체결과 수수료는 거래소 기준을 따릅니다.
+
+키 없이 주문 가드·체결 원장·익절/손절·OCO 실패·재시도·복구를 다시
+확인하려면 다음 모의 테스트를 실행합니다.
 
 ```bash
-python -m pytest -q tests/test_spot_lifecycle.py tests/test_spot_service.py tests/test_spot_recovery_service.py tests/test_scheduler_guard.py
+python -m pytest -q tests/test_spot_testnet_order_guard.py tests/test_spot_lifecycle.py tests/test_spot_service.py tests/test_spot_recovery_service.py tests/test_scheduler_guard.py
 ```
-
-| 항목 | 통과 기준과 확인 위치 |
-| --- | --- |
-| 소액 시장가 매수 → 체결 → OCO | 모의 `test_entry_and_oco_exit`에서 매수 체결 원장이 한 번 기록되고 수수료 반영 후 봇 보유량에 OCO가 한 번 등록됩니다. 실제 확인 시 계좌 현황의 체결 및 보호주문, `/fills`·`/oco` 결과를 테스트넷 결과와 대조합니다. |
-| 익절·손절 | 같은 모의 테스트의 `LIMIT_MAKER`·`STOP_LOSS` 각각에서 매도 원장이 한 번 기록되고 보호 상태가 정리됩니다. 실제 확인 시 반대 주문의 종료와 중복 매도 없음도 확인합니다. |
-| OCO 실패·비상 매도 | `test_rejected_oco_sells_only_bot_quantity_then_stops`에서 확정 거절 시 봇 귀속량만 매도하고 계좌가 멈춥니다. `test_ambiguous_oco_stops_without_selling`에서는 상태가 불명확하면 추가 매도 없이 멈춰야 합니다. 실제 확인 시 체결 수량과 화면의 중지 사유를 대조합니다. |
-| 검증 API 재시작 후 복구 | `test_restart_keeps_existing_oco`에서 기존 보호주문 ID를 재사용합니다. 검증 스택 재시작은 헬스체크와 원장 유지까지만 확인합니다. 실제 주문 복구 합격 기준은 재시작 전후 동일 OCO ID와 새 매수·보호주문 미생성입니다. |
-| 재시도·중복 방지 | `test_oco_unknown_queries_without_resending`에서 제출 응답이 모호해도 기존 주문 조회로 확인하고 재전송하지 않아야 합니다. 실제 확인 시 거래소 주문 수 및 원장 거래 ID 중복 여부를 비교합니다. |
-| UI 표시 | 계좌 현황에서 체결의 방향·수량·수수료, OCO 상태·수량·가격, 중지 사유와 스케줄러 표시가 API와 일치합니다. 체결 시각은 현재 응답에 없으므로 이 검증에서 기대하지 않습니다. |
 
 ## 3. 운영 반영 사전 점검
 
@@ -90,6 +127,7 @@ python -m pytest -q tests/test_spot_lifecycle.py tests/test_spot_service.py test
 | `ALLOWED_ORIGINS` · `ENVIRONMENT` | 와일드카드 없이 실제 교차 출처만 허용. `ENVIRONMENT`는 운영 모드로 명시하는 편이 좋습니다. |
 | `BINANCE_TESTNET` · `BINANCE_SPOT_BASE_URL` | 누락 시 운영 현물 기본값 사용. 명시할 경우 테스트넷 해제와 운영 현물 URL의 일치가 필요합니다. 기존 선물 URL 항목은 현물 코드에서 사용되지 않으므로 후속 정리 대상으로 기록합니다. |
 | `DRY_RUN` · `ENABLE_LIVE_TRADING` | main 배포가 각각 모의 실행과 거래소 쓰기 비활성화를 강제합니다. |
+| `ENABLE_SPOT_TESTNET_ORDERS` | 운영에는 누락 또는 꺼짐. 운영 호스트에서 켜진 상태라면 앱은 기동을 거부합니다. |
 | `ENABLE_TRADING_SCHEDULER` | 누락 시 기본 꺼짐. 현재 운영 워크플로는 따로 강제하지 않으므로 호스트 배포용 설정에서 누락 또는 명시적 꺼짐인지 점검합니다. |
 | `REQUIRE_HTTPS_AUTH` · `TRUST_PROXY_HEADERS` · `AUTH_COOKIE_SECURE` · `AUTH_COOKIE_SAMESITE` | HTTPS 전달과 Secure 쿠키 적용 여부를 확인합니다. 운영 Nginx의 새로고침·`/api/auth/refresh` 쿠키 Path 변환은 배포 전후 확인합니다. |
 | `VITE_API_BASE_URL` | 미니PC 프런트 빌드는 `/api` 사용. 별도 Vercel 배포가 활성화됐다면 프록시 대상을 점검합니다. |

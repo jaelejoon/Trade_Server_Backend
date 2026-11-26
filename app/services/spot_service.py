@@ -155,6 +155,17 @@ class SpotExchange:
             params.update(price=format(prices[0], "f"), timeInForce="GTC")
         return self._submit("/api/v3/order", params, "/api/v3/order", client_id)
 
+    def market_buy_quote(self, quote, client_id):
+        return self._submit(
+            "/api/v3/order",
+            {
+                "symbol": SYMBOL, "side": "BUY", "type": "MARKET",
+                "quoteOrderQty": format(quote, "f"), "newClientOrderId": client_id,
+                "newOrderRespType": "FULL",
+            },
+            "/api/v3/order", client_id,
+        )
+
     def protect(self, quantity, stop_price, take_profit, client_id):
         quantity, (stop_price, take_profit) = self._normalize(quantity, [stop_price, take_profit])
         if stop_price >= take_profit:

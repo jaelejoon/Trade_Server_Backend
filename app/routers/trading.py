@@ -1,11 +1,11 @@
 from datetime import timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.core.config import CANDLE_WARMUP_DAYS, ENABLE_TRADING_SCHEDULER
+from app.core.config import CANDLE_WARMUP_DAYS, ENABLE_SPOT_TESTNET_ORDERS, ENABLE_TRADING_SCHEDULER
 from app.core.jwt import get_current_user
 from app.core.trading_limits import normalize_trading_symbol
 from app.db.session import get_db
@@ -22,7 +22,7 @@ from app.services.account_service import get_active_trading_account_owned_by_use
 from app.services.binance_candle_sync import BinanceCandleSyncService
 from app.core.security import sanitize_sensitive_text
 from app.services.binance_service import get_decrypted_api_keys
-from app.services.bot_service import execute_bot_tick, is_account_live_trading_enabled
+from app.services.bot_service import execute_bot_tick
 
 from app.services.spot_service import SpotExchange
 from app.services.spot_recovery_service import inspect_recovery
@@ -189,7 +189,8 @@ def trading_status(
         "status": "ok",
         "scheduler_enabled": ENABLE_TRADING_SCHEDULER,
         "dry_run": all(account.dry_run for account in accounts) if accounts else current_user.dry_run,
-        "is_live_trading": any(is_account_live_trading_enabled(db, account) for account in accounts),
+        "is_live_trading": False,
+        "spot_testnet_orders_enabled": ENABLE_SPOT_TESTNET_ORDERS,
         "enable_live_trading": current_user.enable_live_trading,
         "user_id": current_user.id,
         "summary": {
@@ -264,6 +265,22 @@ def stop_trading_account(
         "trading_account_id": account.id,
         "symbol": account.symbol,
     }
+
+
+@router.post("/trading/accounts/{account_id}/spot-testnet-check", include_in_schema=False)
+def run_spot_testnet_check(
+    account_id: int,
+    action: Literal["entry", "reject_oco", "advance"],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    if not ENABLE_SPOT_TESTNET_ORDERS:
+        raise HTTPException(status_code=404, detail="현물 테스트넷 주문 검증이 꺼져 있습니다.")
+    account = get_active_trading_account_owned_by_user(db, current_user.id, account_id)
+    result = execute_bot_tick(db, account, test_entry=None if action == "advance" else action)
+    if ENABLE_TRADING_SCHEDULER and action == "entry" and result["status"] == "protected":
+        start_account_job(account_id)
+    return result
 
 
 @router.post("/bot/tick")
