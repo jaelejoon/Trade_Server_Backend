@@ -453,10 +453,12 @@ def prepare_data(raw_df):
     print(df["timestamp"].min(), "~", df["timestamp"].max())
     print(f"정렬/중복제거 후 데이터 수: {len(df)}")
 
-    return prepare_closed_candles(df.set_index("timestamp"), diagnostics=True)
+    return prepare_closed_candles(
+        df.set_index("timestamp"), diagnostics=True, legacy_alignment=True,
+    )
 
 
-def prepare_closed_candles(df, *, diagnostics=False):
+def prepare_closed_candles(df, *, diagnostics=False, legacy_alignment=False):
     """Build V57 features from sorted, UTC-indexed closed one-minute candles."""
     df_15m = resample_ohlcv(df, "15min")
     df_1h = resample_ohlcv(df, "1h")
@@ -473,7 +475,7 @@ def prepare_closed_candles(df, *, diagnostics=False):
         "h4_ema_fast",
         "h4_ema_slow",
         "h4_ema_regime"
-    ]].shift(1)
+    ]].shift(1, freq=None if legacy_alignment else "4h")
 
     df_1h["atr_pct_ma"] = df_1h["atr_pct"].rolling(ATR_SPIKE_LOOKBACK).mean()
 
@@ -610,7 +612,7 @@ def prepare_closed_candles(df, *, diagnostics=False):
         "ema_regime",
         "atr_pct",
         "bb_width"
-    ]].shift(1)
+    ]].shift(1, freq=None if legacy_alignment else "1h")
 
     h1_context = h1_context.rename(columns={
         "market_regime": "h1_market_regime",

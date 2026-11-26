@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.routers import backtest_runs as api
 from app.routers.backtests import router
+from app.strategy.strategy_v57 import prepare_closed_candles
 from app.services.backtest_engine import (
     BacktestInputError, Signal, replay, v57_signals, validate_candles,
 )
@@ -85,7 +86,19 @@ def test_v57_signal_prefix_is_invariant():
     assert {time: value for time, value in v57_signals(changed).items() if time < boundary} == {
         time: value for time, value in original.items() if time < boundary
     }
-    assert v57_signals(bars.iloc[:-1]) == {time: value for time, value in original.items() if time < boundary}
+    for cutoff in (1, 75, 137, 233):
+        prefix = bars.iloc[:-cutoff]
+        closed_through = prefix.index[-1] + pd.Timedelta(minutes=1)
+        assert v57_signals(prefix) == {
+            time: value for time, value in original.items() if time <= closed_through
+        }
+
+    # A previously closed 4h/1h candle must remain visible even while the
+    # following higher-timeframe candle is still incomplete.
+    full_hours, full_quarters = prepare_closed_candles(bars)
+    prefix_hours, prefix_quarters = prepare_closed_candles(bars.iloc[:-1])
+    pd.testing.assert_frame_equal(prefix_hours, full_hours.loc[prefix_hours.index])
+    pd.testing.assert_frame_equal(prefix_quarters, full_quarters.loc[prefix_quarters.index])
 
 
 @pytest.mark.parametrize("row_indices", [[0, 2], [0, 1, 1, 2]])
