@@ -145,21 +145,21 @@ class Position:
         return self.side * self.quantity * (price - self.price)
 
     def close_price(self, bar, liquidation):
-        for price, reason in ((liquidation, "liquidation"), (self.stop, "stop_loss")):
-            if (bar.open - price) * self.side <= 0:
-                return bar.open, reason
+        if liquidation is not None and (bar.open - liquidation) * self.side <= 0:
+            return bar.open, "liquidation"
+        if (bar.open - self.stop) * self.side <= 0:
+            return bar.open, "stop_loss"
         if (bar.open - self.target) * self.side >= 0:
             return bar.open, "take_profit"
         if bar.Index >= self.expires:
             return bar.open, "max_hold"
         adverse, favorable = (bar.low, bar.high) if self.side == 1 else (bar.high, bar.low)
-        if (adverse - self.stop) * self.side <= 0:
-            # The protective stop was crossed first if it lies before liquidation.
-            if (self.stop - liquidation) * self.side > 0:
-                return self.stop, "stop_loss"
-        if (adverse - liquidation) * self.side <= 0:
+        stop_hit = (adverse - self.stop) * self.side <= 0
+        if stop_hit and (liquidation is None or (self.stop - liquidation) * self.side > 0):
+            return self.stop, "stop_loss"
+        if liquidation is not None and (adverse - liquidation) * self.side <= 0:
             return liquidation, "liquidation"
-        if (adverse - self.stop) * self.side <= 0:
+        if stop_hit:
             return self.stop, "stop_loss"
         if (favorable - self.target) * self.side >= 0:
             return self.target, "take_profit"
@@ -168,11 +168,14 @@ class Position:
 
 def replay(
     candles, signals, initial_equity, leverage, fee_bps, slippage_bps, funding,
-    *, loss_limits=None, include_curve=True,
+    *, loss_limits=None, include_curve=True, spot=None,
 ):
     """Signals indexed by availability time fill at that minute's open."""
     if loss_limits is not None and leverage != 1:
         raise BacktestInputError("1배 전용 전략은 레버리지 1만 허용합니다.")
+    if spot is not None and (leverage != 1 or funding or any(s.side != 1 for s in signals.values())):
+        raise BacktestInputError("현물 재생은 1배 롱과 펀딩 미적용만 지원합니다.")
+    rejected_buys = rejected_sells = 0
     fee_rate, slip = fee_bps / 10_000, slippage_bps / 10_000
     balance = peak = initial_equity
     mdd = 0.0
@@ -212,6 +215,9 @@ def replay(
                 balance * signal.max_position_fraction / entry,
                 balance / (entry * (1 / leverage + fee_rate)),
             )
+            if spot is not None:
+                quantity = spot.buy_quantity(quantity, entry)
+                rejected_buys += quantity == 0
             if quantity > 0 and (loss_limits is None or stop > 0):
                 max_entry_exposure_pct = max(max_entry_exposure_pct, quantity * entry / balance * 100)
                 fee = quantity * entry * fee_rate
@@ -225,12 +231,17 @@ def replay(
 
         if position:
             # Fixed 0.5% maintenance margin approximation on position notional.
-            margin = position.price / leverage - position.funding_cost / position.quantity
-            liquidation = (position.price * position.side - margin) / (position.side - 0.005)
+            liquidation = None
+            if spot is None:
+                margin = position.price / leverage - position.funding_cost / position.quantity
+                liquidation = (position.price * position.side - margin) / (position.side - 0.005)
             price, reason = position.close_price(bar, liquidation)
             exit_time = time
             if price is None and time == candles.index[-1]:
                 price, reason, exit_time = bar.close, "end_of_period", time + MINUTE
+            if price is not None and spot is not None and not spot.can_sell(position.quantity, price * (1 - slip)):
+                rejected_sells += 1
+                price = None
             if price is not None:
                 exit_price = price * (1 - position.side * slip)
                 exit_fee = position.quantity * exit_price * fee_rate
@@ -276,8 +287,10 @@ def replay(
 
     return {
         "metrics": {
-            "final_equity_usdt": balance,
-            "net_return_pct": (balance / initial_equity - 1) * 100,
+            "final_equity_usdt": equity,
+            "net_return_pct": (equity / initial_equity - 1) * 100,
+            **({"rejected_buys": rejected_buys, "rejected_sells": rejected_sells,
+                "open_entry_fee_usdt": position.entry_fee if position else 0.0} if spot is not None else {}),
             "mdd_pct": mdd * 100,
             "profit_factor": gains / losses if losses else None,
             "win_rate_pct": wins / len(trades) * 100 if trades else 0.0,

@@ -29,10 +29,13 @@ REGIMES = {
 }
 
 
-def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, funding, *, curve=True):
+def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, funding, *, curve=True, spot=None):
     """Apply monthly long/cash decisions at the open and mark NAV each minute."""
-    if not 0 < exposure < 1:
-        raise ValueError("롱 전략 진입 비중은 0과 1 사이여야 합니다.")
+    if not (0 < exposure < 1 or exposure == 1 and spot is not None):
+        raise ValueError("롱 전략 진입 비중이 유효하지 않습니다.")
+    if spot is not None and funding:
+        raise ValueError("현물 재생에는 펀딩을 적용할 수 없습니다.")
+    rejected_buys = rejected_sells = 0
     index = candles.index
     fee_rate, slip = fee_bps / 10_000, slippage_bps / 10_000
     closes, opens = candles.close.to_numpy(), candles.open.to_numpy()
@@ -69,26 +72,32 @@ def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, 
             funding_cost += cost
             realized -= cost
             # Positive residual cash keeps long notional at or below marked NAV.
-            needs_exit = realized <= quantity * entry
+            needs_exit = spot is None and realized <= quantity * entry
             if (desired is not None and not desired) or needs_exit or i == len(index) - 1:
                 at_end = i == len(index) - 1 and desired is not False and not needs_exit
                 price = (closes[i] if at_end else opens[i]) * (1 - slip)
-                exit_fee = quantity * price * fee_rate
-                gross = quantity * (price - entry)
-                realized += gross - exit_fee
-                trades.append({
-                    "entry_time": entry_time.isoformat() + "Z",
-                    "exit_time": (time + pd.Timedelta(minutes=1) if at_end else time).isoformat() + "Z",
-                    "side": "LONG", "entry_price": entry, "exit_price": price,
-                    "quantity": quantity, "fees_usdt": entry_fee + exit_fee,
-                    "funding_cost_usdt": funding_cost,
-                    "net_pnl_usdt": gross - entry_fee - exit_fee - funding_cost,
-                    "exit_reason": "exposure_limit" if needs_exit else "end_of_period" if at_end else "regime_exit",
-                })
-                quantity = 0.0
+                if spot is not None and not spot.can_sell(quantity, price):
+                    rejected_sells += 1
+                else:
+                    exit_fee = quantity * price * fee_rate
+                    gross = quantity * (price - entry)
+                    realized += gross - exit_fee
+                    trades.append({
+                        "entry_time": entry_time.isoformat() + "Z",
+                        "exit_time": (time + pd.Timedelta(minutes=1) if at_end else time).isoformat() + "Z",
+                        "side": "LONG", "entry_price": entry, "exit_price": price,
+                        "quantity": quantity, "fees_usdt": entry_fee + exit_fee,
+                        "funding_cost_usdt": funding_cost,
+                        "net_pnl_usdt": gross - entry_fee - exit_fee - funding_cost,
+                        "exit_reason": "exposure_limit" if needs_exit else "end_of_period" if at_end else "regime_exit",
+                    })
+                    quantity = 0.0
         elif desired and i < len(index) - 1 and realized > 0:
             entry_time, entry = time, opens[i] * (1 + slip)
             quantity = realized * exposure / (entry * (1 + fee_rate))
+            if spot is not None:
+                quantity = spot.buy_quantity(quantity, entry)
+                rejected_buys += quantity == 0
             entry_fee = quantity * entry * fee_rate
             realized -= entry_fee
             funding_cost = 0.0
@@ -107,7 +116,9 @@ def replay_regime(candles, decisions, exposure, initial, fee_bps, slippage_bps, 
         longest = max(longest, streak)
     return {
         "metrics": {
-            "final_equity_usdt": realized, "net_return_pct": (realized / initial - 1) * 100,
+            "final_equity_usdt": nav, "net_return_pct": (nav / initial - 1) * 100,
+            **({"rejected_buys": rejected_buys, "rejected_sells": rejected_sells,
+                "open_entry_fee_usdt": entry_fee if quantity else 0.0} if spot is not None else {}),
             "mdd_pct": mdd * 100,
             "profit_factor": sum(max(value, 0) for value in pnl) / loss if loss else None,
             "win_rate_pct": 100 * sum(value > 0 for value in pnl) / len(pnl) if pnl else 0.0,
