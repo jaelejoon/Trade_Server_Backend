@@ -1,0 +1,102 @@
+name: trade-staging
+
+services:
+  staging-api:
+    image: trade-staging-api:${STAGING_BACKEND_SHA:?후보 SHA가 필요합니다}
+    container_name: trade-staging-api
+    environment:
+      ENVIRONMENT: staging
+      DATABASE_URL: postgresql+psycopg2://trade_staging:${STAGING_DB_PASSWORD:?검증 DB 비밀번호가 필요합니다}@staging-db:5432/trade_staging
+      JWT_SECRET_KEY: ${STAGING_JWT_SECRET_KEY:?검증 JWT 키가 필요합니다}
+      ENCRYPTION_KEY: ${STAGING_ENCRYPTION_KEY:?검증 Fernet 키가 필요합니다}
+      BINANCE_TESTNET: "true"
+      BINANCE_FUTURES_BASE_URL: https://demo-fapi.binance.com
+      BINANCE_SPOT_BASE_URL: https://testnet.binance.vision
+      DRY_RUN: "true"
+      ENABLE_LIVE_TRADING: "false"
+      REQUIRE_HTTPS_AUTH: "true"
+      TRUST_PROXY_HEADERS: "true"
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_COOKIE_SAMESITE: lax
+      DISABLE_DOCS: "true"
+      BACKTEST_MAX_RUNNING_PER_USER: "1"
+      BACKTEST_MAX_RUNNING_GLOBAL: "1"
+      CANDLE_IMPORT_MAX_RUNNING_GLOBAL: "1"
+    entrypoint: ["python", "-B", "/staging-start.py"]
+    command: []
+    volumes:
+      - ./staging/start-api.py:/staging-start.py:ro
+    networks: [staging-web, staging-db]
+    depends_on:
+      staging-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -B
+        - -c
+        - 'import json, urllib.request; r = json.load(urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)); raise SystemExit(not (r.get("status") == "ok" and r.get("dry_run") is True and r.get("binance_testnet") is True))'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    cpus: 1.25
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  staging-db:
+    image: postgres:16
+    container_name: trade-staging-postgres
+    environment:
+      POSTGRES_USER: trade_staging
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:?검증 DB 비밀번호가 필요합니다}
+      POSTGRES_DB: trade_staging
+    volumes:
+      - staging-postgres:/var/lib/postgresql/data
+    networks: [staging-db]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "trade_staging", "-d", "trade_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    cpus: 0.75
+    mem_limit: 768m
+
+  staging-tailscale:
+    image: tailscale/tailscale:v1.98.3
+    container_name: trade-staging-tailscale
+    environment:
+      TS_HOSTNAME: trade-staging
+      TS_USERSPACE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_AUTH_ONCE: "true"
+      TS_AUTHKEY: ${STAGING_TS_AUTHKEY:-}
+    volumes:
+      - staging-tailscale:/var/lib/tailscale
+    networks: [staging-web]
+    cpus: 0.25
+    mem_limit: 128m
+
+  staging-nginx:
+    image: nginx:1.28-alpine
+    container_name: trade-staging-nginx
+    network_mode: "service:staging-tailscale"
+    depends_on: [staging-tailscale]
+    volumes:
+      - ./staging/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./staging-dist:/usr/share/nginx/html:ro
+    cpus: 0.25
+    mem_limit: 128m
+
+networks:
+  staging-web: {}
+  staging-db:
+    internal: true
+
+volumes:
+  staging-postgres: {}
+  staging-tailscale: {}
