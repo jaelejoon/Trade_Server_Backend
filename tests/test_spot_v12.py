@@ -64,7 +64,7 @@ def test_rebalance_sell_cap_and_paper_fee():
 def test_pending_testnet_order_restart_only_looks_up(monkeypatch):
     db, exchange = Mock(), Mock()
     account = SimpleNamespace(is_running=True)
-    decision = {"boundary": "2026-01-05", "execution": {"status": "pending", "side": "BUY", "client_id": "id"}}
+    decision = {"boundary": "2026-01-05", "execution": {"status": "pending", "side": "BUY", "client_id": "id", "decision_id": "d", "notional": "10"}}
     state = SimpleNamespace(runtime_state={"v12_wa": {"decision": decision}})
     exchange.lookup.return_value = None
     outcome = runtime._finish_testnet(db, account, state, exchange, submit=False)
@@ -83,7 +83,7 @@ def test_same_boundary_records_one_paper_intent(monkeypatch):
     model, _ = advance(None, date(2025, 12, 31), 100, True, 100)
     model["closes"] = list(range(100, 111))
     account = SimpleNamespace(id=2, user_id=3, is_running=True, is_active=True, market_type="SPOT")
-    state = SimpleNamespace(runtime_state={"v12_wa": {"model": model}})
+    state = SimpleNamespace(runtime_state={"v12_wa": {"model": model}, "v12_controls": {"enabled": True}})
     db = Mock()
     db.scalar.return_value = state
     db.execute.return_value.mappings.return_value = [
@@ -93,6 +93,7 @@ def test_same_boundary_records_one_paper_intent(monkeypatch):
     monkeypatch.setattr(runtime, "ENABLE_SPOT_TESTNET_ORDERS", False)
     assert runtime._calculate(db, account, now, boundary, boundary.date(), boundary.date(), False)[
         "decision"]["execution"]["status"] == "simulated"
+    db.scalar.side_effect = [state, 120]
     assert runtime._calculate(db, account, now, boundary, boundary.date(), boundary.date(), False)[
         "status"] == "up_to_date"
     db.commit.assert_called_once()
@@ -131,7 +132,7 @@ def test_postgresql_daily_cutoff_ignores_open_boundary_minute():
 def test_testnet_submission_checks_real_clock_after_planning():
     db, exchange = Mock(), Mock()
     account = SimpleNamespace(is_running=True)
-    decision = {"boundary": "2020-01-01", "execution": {"status": "pending", "side": "BUY", "client_id": "id"}}
+    decision = {"boundary": "2020-01-01", "decision_id": "d", "request": True, "execution": {"status": "pending", "side": "BUY", "client_id": "id", "decision_id": "d", "notional": "10"}}
     state = SimpleNamespace(runtime_state={"v12_wa": {"decision": decision}})
     outcome = runtime._finish_testnet(db, account, state, exchange, submit=True)
     assert outcome["status"] == "expired" and account.is_running

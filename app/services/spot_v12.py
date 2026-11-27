@@ -1,6 +1,7 @@
 """V12 and weekly anchored walk-forward decisions from completed UTC days."""
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, timedelta
 from math import sqrt
 from statistics import mean, stdev
@@ -13,25 +14,48 @@ DAY = timedelta(days=1)
 VERSION = "spot-v12-wa-1"
 
 
+@dataclass(frozen=True)
+class V12Parameters:
+    average_months: int = 12
+    volatility_months: int = 6
+    maximum_weight: float = 1.0
+    target_volatility: float = .70
+    defensive_volatility: float = .35
+    defensive_maximum: float = .45
+    score_gap: float = .05
+    maximum_reduction: float = .15
+    hold_days: int = 28
+    minimum_days: int = 365
+    minimum_observations: int = 350
+    drawdown_penalty: float = .5
+
+
+DEFAULT_PARAMETERS = V12Parameters()
+
+
 def quarter(day):
     return day.day == 1 and day.month in (1, 4, 7, 10)
 
 
-def monthly_targets(closes):
-    if len(closes) < 12 or any(value is None for value in closes[-12:]):
+def monthly_targets(closes, params=DEFAULT_PARAMETERS):
+    months = params.average_months
+    window = params.volatility_months
+    if len(closes) < max(months, window + 1) or any(value is None for value in closes[-months:]):
         return None, None, None, None
-    average = mean(closes[-12:])
-    returns = [right / left - 1 for left, right in zip(closes[-7:-1], closes[-6:])]
+    average = mean(closes[-months:])
+    if any(value is None for value in closes[-window - 1:]):
+        return None, None, average, None
+    returns = [right / left - 1 for left, right in zip(closes[-window - 1:-1], closes[-window:])]
     vol = stdev(returns) * sqrt(12)
     if closes[-1] <= average:
         return 0., 0., average, vol
-    return min(1., .70 / vol) if vol else 1., min(.45, .35 / vol) if vol else .45, average, vol
+    return min(params.maximum_weight, params.target_volatility / vol) if vol else params.maximum_weight, min(params.defensive_maximum, params.defensive_volatility / vol) if vol else params.defensive_maximum, average, vol
 
 
-def _shadow_trade(book, market, target, fee):
+def _shadow_trade(book, market, target, fee, slip=.0002):
     cash, quantity = book["cash"], book["quantity"]
     buy = target * (cash + quantity * market) > quantity * market
-    price = market * (1.0002 if buy else .9998)
+    price = market * (1 + slip if buy else 1 - slip)
     difference = target * (cash + quantity * price) - quantity * price
     if difference > 0:
         amount = min(cash / (price * (1 + fee)), difference / (price * (1 + target * fee)))
@@ -44,9 +68,10 @@ def _shadow_trade(book, market, target, fee):
         book.update(cash=cash - amount * price * (1 + fee), quantity=round(quantity + amount, 5))
     else:
         book.update(cash=cash + amount * price * (1 - fee), quantity=round(quantity - amount, 5))
+    return price, amount, "BUY" if difference > 0 else "SELL"
 
 
-def advance(previous, day, prior_close, exact_close, boundary_open, fee=.001):
+def advance(previous, day, prior_close, exact_close, boundary_open, fee=.001, params=DEFAULT_PARAMETERS, slip=.0002):
     """Process one UTC boundary. Shadow equity is marked before the boundary trade."""
     state = deepcopy(previous) if previous else {
         "closes": [], "primary": None, "defensive": None, "mode": "V12",
@@ -58,10 +83,10 @@ def advance(previous, day, prior_close, exact_close, boundary_open, fee=.001):
         raise ValueError("UTC 날짜를 순서대로 처리해야 합니다.")
     state["boundary"] = day.isoformat()
     if day.day == 1:
-        state["closes"] = (state["closes"] + [prior_close if exact_close else None])[-12:]
+        state["closes"] = (state["closes"] + [prior_close if exact_close else None])[-max(params.average_months, params.volatility_months + 1):]
     quarterly, weekly = quarter(day), day.weekday() == 0
     update_base = quarterly or day == ANCHOR
-    primary, defensive, average, vol = monthly_targets(state["closes"])
+    primary, defensive, average, vol = monthly_targets(state["closes"], params)
     if update_base:
         state["average"], state["volatility"] = average, vol
         if primary is not None:
@@ -77,32 +102,32 @@ def advance(previous, day, prior_close, exact_close, boundary_open, fee=.001):
             book["peak"] = max(book["peak"], nav)
             book["mdd"] = max(book["mdd"], 1 - nav / book["peak"])
 
-    scores = {name: None if book["first"] is None else book["nav"] / book["first"] - 1 - .5 * book["mdd"]
+    scores = {name: None if book["first"] is None else book["nav"] / book["first"] - 1 - params.drawdown_penalty * book["mdd"]
               for name, book in state["books"].items()}
     changed = False
     suggested = "V12"
     if weekly and day >= ANCHOR:
-        if day - ANCHOR >= timedelta(days=365) and state["observations"] >= 350 and prior_close is not None:
+        if day - ANCHOR >= timedelta(days=params.minimum_days) and state["observations"] >= params.minimum_observations and prior_close is not None:
             candidate = max(("V35-45", "CASH"), key=scores.__getitem__)
-            if scores[candidate] - scores["V12"] >= .05:
+            if scores[candidate] - scores["V12"] >= params.score_gap:
                 suggested = candidate
         last = state["changed_at"]
         changed = suggested != state["mode"] and (
-            suggested == "V12" or last is None or day - date.fromisoformat(last) >= timedelta(days=28)
+            suggested == "V12" or last is None or day - date.fromisoformat(last) >= timedelta(days=params.hold_days)
         )
         if changed:
             state.update(mode=suggested, changed_at=day.isoformat())
 
     if update_base and primary is not None and boundary_open is not None and day >= ANCHOR:
         for name, target in (("V12", primary), ("V35-45", defensive)):
-            _shadow_trade(state["books"][name], boundary_open, target, fee)
+            _shadow_trade(state["books"][name], boundary_open, target, fee, slip)
 
     target = state["primary"]
     if target is not None:
         if state["mode"] == "CASH":
-            target = max(0., target - .15)
+            target = max(0., target - params.maximum_reduction)
         elif state["mode"] == "V35-45":
-            target = max(target - .15, min(target, (target + state["defensive"]) / 2))
+            target = max(target - params.maximum_reduction, min(target, (target + state["defensive"]) / 2))
     result = None
     if day >= ANCHOR and (quarterly or weekly):
         result = {

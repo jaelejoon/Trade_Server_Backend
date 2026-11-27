@@ -24,6 +24,8 @@ from app.services.backtest_engine import (
     validate_candles,
 )
 from app.services.strategy_1x_regimes import replay_regime
+from app.services.spot_v12 import VERSION as V12_VERSION
+from app.services.spot_v12_backtest import V12Request, simulate_v12
 
 
 router = APIRouter(prefix="/runs")
@@ -46,6 +48,8 @@ class RunRequest(BaseModel):
     slippage_bps: float = Field(default=0, ge=0, le=100)
     funding: Literal["disabled"] = "disabled"  # 현물 API는 1배와 펀딩 0만 허용한다.
 
+    v12_parameters: V12Request | None = None
+
     @field_validator("start", "end", mode="before")
     @classmethod
     def parse_iso_datetime(cls, value):
@@ -58,6 +62,20 @@ class RunRequest(BaseModel):
         self.start = self.start.astimezone(timezone.utc)
         self.end = self.end.astimezone(timezone.utc)
         closed_through = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        if self.strategy_id == V12_VERSION:
+            if (self.strategy_version != "1" or self.start.year < 2020
+                    or any(t != t.replace(hour=0, minute=0, second=0, microsecond=0) for t in (self.start, self.end))
+                    or self.end > closed_through or not timedelta(0) < self.end - self.start <= timedelta(days=3660)):
+                raise ValueError("V12 기간은 2020년 이후 UTC 일 경계에서 최대 10년입니다.")
+            self.v12_parameters = self.v12_parameters or V12Request()
+            if "fee_bps" not in self.model_fields_set:
+                self.fee_bps = 10
+            if "slippage_bps" not in self.model_fields_set:
+                self.slippage_bps = 2
+            return self
+        if self.v12_parameters is not None:
+            raise ValueError("V12 파라미터는 V12 실행에만 사용할 수 있습니다.")
+
         if (
             self.start.year < 2019
             or self.start != self.start.replace(second=0, microsecond=0)
@@ -73,6 +91,8 @@ class RunRequest(BaseModel):
 
 
 def simulate(db, user_id, body):
+    if body.strategy_id == V12_VERSION:
+        return simulate_v12(db, user_id, body)
     strategy = STRATEGIES[body.strategy_id]
     start = pd.Timestamp(body.start).tz_localize(None)
     end = pd.Timestamp(body.end).tz_localize(None)

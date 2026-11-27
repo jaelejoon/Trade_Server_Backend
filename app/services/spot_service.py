@@ -202,6 +202,9 @@ class SpotExchange:
     def account(self):
         return self._signed("GET", "/api/v3/account")
 
+    def open_orders(self):
+        return self._signed("GET", "/api/v3/openOrders", {"symbol": SYMBOL})
+
     def open_order_lists(self):
         return self._signed("GET", "/api/v3/openOrderList")
 

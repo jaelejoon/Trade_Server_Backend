@@ -26,6 +26,7 @@ from app.services.bot_service import execute_bot_tick
 
 from app.services.spot_service import SpotExchange
 from app.services.spot_v12_runtime import strategy_status
+from app.services.spot_v12_controls import OperationsRequest, change_operations, controls, get_operations
 from app.services.spot_recovery_service import inspect_recovery
 from app.services.error_log_service import create_error_log
 
@@ -89,9 +90,17 @@ def _spot_journal(db, account_id):
     return journal if isinstance(journal, dict) else {}
 
 
+def _operation_runtime(db, account_id):
+    state = db.query(BotSignalState).filter_by(trading_account_id=account_id).one_or_none()
+    return state.runtime_state or {} if state else {}
+
+
 def _stored_stop(db, account):
     if account.is_running:
         return None, None
+    config = controls(_operation_runtime(db, account.id))
+    if config.get("stop_reason"):
+        return config["stop_reason"], config.get("stopped_at")
     clauses = [and_(ErrorLog.source == "spot_recovery",
                     ErrorLog.message == "봇 체결 기록 확인 필요")]
     if _spot_journal(db, account.id).get("halted") is True:
@@ -227,6 +236,9 @@ def start_trading_account(
         raise HTTPException(status_code=400, detail=str(exc)) from None
     if account.market_type != "SPOT":
         raise HTTPException(status_code=409, detail="현물 계정을 새로 등록하세요.")
+    settings = controls(_operation_runtime(db, account.id))
+    if not settings["enabled"] or settings.get("stop_reason"):
+        raise HTTPException(409, "관리자 운용 설정이나 중지 사유를 확인하세요.")
     sync_result = BinanceCandleSyncService.warmup_historical_1m_candles(
         db=db,
         user_id=current_user.id,
@@ -407,6 +419,30 @@ def get_spot_strategy(
     if result is None:
         raise HTTPException(status_code=404, detail="현물 계정을 찾을 수 없습니다.")
     return result
+
+
+@router.get("/trading/accounts/{trading_account_id}/operations")
+def read_v12_operations(trading_account_id: int, db: Session = Depends(get_db),
+                        _admin: User = Depends(require_admin)):
+    _, state = get_operations(db, trading_account_id)
+    return controls((state.runtime_state or {}) if state else {})
+
+
+@router.patch("/trading/accounts/{trading_account_id}/operations")
+def update_v12_operations(trading_account_id: int, body: OperationsRequest,
+                          db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    account, settings = change_operations(db, trading_account_id, admin.id, body=body)
+    (start_account_job if account.is_running else stop_account_job)(account.id)
+    return settings
+
+
+@router.post("/trading/accounts/{trading_account_id}/operations/resume")
+def resume_v12_operations(trading_account_id: int, db: Session = Depends(get_db),
+                          admin: User = Depends(require_admin)):
+    account, settings = change_operations(db, trading_account_id, admin.id, resume=True)
+    if account.is_running:
+        start_account_job(account.id)
+    return settings
 
 
 @router.get("/trading/logs")
