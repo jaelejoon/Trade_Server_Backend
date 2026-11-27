@@ -32,6 +32,8 @@ def test_stop_conditions_at_exact_threshold_and_for_unexpected_orders():
     assert safety_reason(settings, Decimal("60.01"), Decimal(0), Decimal(1)) is None
     assert safety_reason(settings, Decimal(200), Decimal(0), Decimal(1), mismatched=True)
     decision = {"request": True, "decision_id": "d"}
-    assert validate_intent({"decision_id": "other", "notional": "1"}, decision, "12")
-    assert validate_intent({"decision_id": "d", "notional": "12.01"}, decision, "12")
-    assert validate_intent({"decision_id": "d", "notional": "12"}, decision, "12") is None
+    order = {"side": "BUY", "quantity": ".001", "quote": "12", "notional": "12", "decision_id": "d"}
+    assert validate_intent({**order, "decision_id": "other"}, decision, "12")
+    assert validate_intent({**order, "quote": "12.01"}, decision, "12")
+    assert validate_intent(order, decision, "12") is None
+    assert validate_intent({**order, "side": "SELL"}, decision, "12", sell_price=Decimal(13000))

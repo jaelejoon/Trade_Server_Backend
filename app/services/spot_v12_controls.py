@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
@@ -33,11 +33,23 @@ def safety_reason(settings, cash, owned, price, *, mismatched=False):
     return None
 
 
-def validate_intent(execution, decision, cap):
-    if not decision.get("request") or execution.get("decision_id") != decision.get("decision_id"):
-        return "저장된 봇 결정에 없는 주문 의도입니다."
-    if Decimal(execution["notional"]) > Decimal(cap):
-        return "1회 주문 상한을 초과했습니다."
+def validate_intent(execution, decision, cap, *, sell_price=None):
+    unexpected = "저장된 봇 결정에 없는 주문 의도입니다."
+    if (not decision.get("request") or not decision.get("decision_id")
+            or execution.get("decision_id") != decision["decision_id"]
+            or execution.get("side") not in {"BUY", "SELL"}):
+        return unexpected
+    try:
+        notional = Decimal(execution["notional"])
+        quantity = Decimal(execution["quantity"])
+        outgoing = (Decimal(execution["quote"]) if execution["side"] == "BUY"
+                    else quantity * sell_price if sell_price is not None else notional)
+        if any(not value.is_finite() or value <= 0 for value in (notional, outgoing, quantity)):
+            return unexpected
+        if max(notional, outgoing) > Decimal(cap):
+            return "1회 주문 상한을 초과했습니다."
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return unexpected
     return None
 
 

@@ -129,11 +129,18 @@ def _finish_testnet(db, account, state, exchange, *, submit):
     stored = state.runtime_state["v12_wa"]
     decision = stored["decision"]
     execution = dict(decision["execution"])
-    if submit:
-        reason = validate_intent(execution, decision, controls(state.runtime_state)["max_order_usdt"])
-        if reason:
-            return halt(db, account, state, reason)
     expiry = datetime.combine(date.fromisoformat(decision["boundary"]), time.min, tzinfo=timezone.utc)
+    if submit and datetime.now(timezone.utc) < expiry + timedelta(minutes=5):
+        cap = controls(state.runtime_state)["max_order_usdt"]
+        reason = validate_intent(execution, decision, cap)
+        if not reason and execution["side"] == "SELL":
+            reason = validate_intent(execution, decision, cap, sell_price=exchange.price())
+        if reason:
+            rejected = dict(decision, execution={**execution, "status": "blocked", "reason": reason})
+            history = {**stored.get("history", {}), rejected["boundary"]: rejected}
+            state.runtime_state = {**state.runtime_state,
+                                   "v12_wa": {**stored, "decision": rejected, "history": history}}
+            return halt(db, account, state, reason)
     if submit and datetime.now(timezone.utc) >= expiry + timedelta(minutes=5):
         execution["status"] = "expired"
     else:
