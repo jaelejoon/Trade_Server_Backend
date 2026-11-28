@@ -84,6 +84,7 @@ def test_empty_oco_and_recorded_stop(read_api, monkeypatch):
     db.query.return_value.filter.return_value.order_by.return_value.first.return_value = (
         SimpleNamespace(message="봇 체결 기록 확인 필요", created_at=datetime(2026, 11, 26))
     )
+    monkeypatch.setattr(trading, "_operation_runtime", lambda *_: {})
     assert trading._stored_stop(db, account) == (
         "봇 체결 기록 확인 필요", datetime(2026, 11, 26, tzinfo=timezone.utc),
     )

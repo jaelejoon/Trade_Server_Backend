@@ -84,7 +84,7 @@ def binance_signed_request(
 ):
     allowed_paths = {
         "GET": {"/api/v3/account", "/api/v3/order", "/api/v3/orderList",
-                "/api/v3/openOrderList", "/api/v3/myTrades", "/sapi/v1/account/apiRestrictions"},
+                "/api/v3/openOrderList", "/api/v3/openOrders", "/api/v3/myTrades", "/sapi/v1/account/apiRestrictions"},
         "POST": {"/api/v3/order", "/api/v3/orderList/oco"},
     }
     if base_url != BINANCE_SPOT_BASE_URL or path not in allowed_paths.get(method, set()):

@@ -1,5 +1,6 @@
 """Persist V12 decisions and simulate bounded orders without exchange credentials."""
 
+from dataclasses import asdict
 from hashlib import sha256
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
@@ -15,11 +16,11 @@ from app.services.binance_service import get_decrypted_api_keys
 from app.services.spot_lifecycle import SpotLifecycle
 from app.services.spot_recovery_service import inspect_recovery
 from app.services.spot_service import SpotExchange
-from app.services.spot_v12 import DAY, advance, quarter, rebalance
+from app.services.spot_v12_controls import controls, halt, safety_reason, validate_intent
+from app.services.spot_v12 import DEFAULT_PARAMETERS, DAY, advance, quarter, rebalance
 
 FIRST_DAY = date(2017, 9, 1)
 FEE = Decimal(".001")
-SIMULATION_CASH = Decimal("10000")
 
 DAILY_MARKS = text("""
 SELECT boundary.ts::date AS day, previous.close,
@@ -43,12 +44,12 @@ def next_boundary(day):
                 if (day + timedelta(days=offset)).weekday() == 0 or quarter(day + timedelta(days=offset)))
 
 
-def paper_intent(book, result, price):
+def paper_intent(book, result, price, cap=SPOT_TESTNET_MAX_ORDER_USDT):
     cash = Decimal(book["cash"])
     owned = Decimal(book["quantity"])
     price = Decimal(str(price))
     side, quantity = rebalance(
-        cash, owned, owned, price, Decimal(str(result["target"])), FEE, SPOT_TESTNET_MAX_ORDER_USDT,
+        cash, owned, owned, price, Decimal(str(result["target"])), FEE, cap,
     )
     lot = Decimal(".00001")
     quantity = (quantity / lot).to_integral_value(rounding=ROUND_DOWN) * lot
@@ -88,12 +89,12 @@ def _exchange(db, account):
     return SpotExchange(*get_decrypted_api_keys(key))
 
 
-def _testnet_plan(db, account, exchange, decision, journal):
+def _testnet_plan(db, account, exchange, decision, journal, settings):
     if any(journal.get(key) for key in ("halted", "buy", "sell", "oco")):
         return {"status": "blocked", "reason": "existing_spot_journal"}
     recovery, orders = inspect_recovery(db, account.id, exchange)
-    if orders or (recovery["halt"] and recovery["balance"] != 0):
-        return {"status": "blocked", "reason": "unconfirmed_inventory_or_open_orders"}
+    if orders or exchange.open_orders():
+        return {"status": "stop", "reason": "봇 결정에 없는 열린 주문을 발견했습니다."}
     if recovery["halt"] and db.scalar(text(
         "SELECT 1 FROM spot_fills WHERE trading_account_id = :account_id LIMIT 1"
     ), {"account_id": account.id}) is not None:
@@ -103,8 +104,12 @@ def _testnet_plan(db, account, exchange, decision, journal):
     price = exchange.price()
     if price <= 0:
         return {"status": "blocked", "reason": "invalid_price"}
+    reason = safety_reason(settings, cash, recovery["owned"], price,
+                           mismatched=recovery["balance"] != recovery["owned"])
+    if reason:
+        return {"status": "stop", "reason": reason}
     side, amount = rebalance(cash, recovery["owned"], recovery["quantity"], price,
-                             Decimal(str(decision["target"])), FEE, SPOT_TESTNET_MAX_ORDER_USDT)
+                             Decimal(str(decision["target"])), FEE, Decimal(settings["max_order_usdt"]))
     if amount <= 0:
         return {"status": "below_order_minimum"}
     try:
@@ -115,6 +120,8 @@ def _testnet_plan(db, account, exchange, decision, journal):
     except ValueError:
         return {"status": "below_order_minimum"}
     return {"status": "pending", "side": side, "quantity": str(quantity), "quote": str(quote),
+            "notional": str(quote if side == "BUY" else quantity * price),
+            "decision_id": decision["decision_id"],
             "client_id": "v12-" + sha256(decision["decision_id"].encode()).hexdigest()[:28]}
 
 
@@ -123,6 +130,17 @@ def _finish_testnet(db, account, state, exchange, *, submit):
     decision = stored["decision"]
     execution = dict(decision["execution"])
     expiry = datetime.combine(date.fromisoformat(decision["boundary"]), time.min, tzinfo=timezone.utc)
+    if submit and datetime.now(timezone.utc) < expiry + timedelta(minutes=5):
+        cap = controls(state.runtime_state)["max_order_usdt"]
+        reason = validate_intent(execution, decision, cap)
+        if not reason and execution["side"] == "SELL":
+            reason = validate_intent(execution, decision, cap, sell_price=exchange.price())
+        if reason:
+            rejected = dict(decision, execution={**execution, "status": "blocked", "reason": reason})
+            history = {**stored.get("history", {}), rejected["boundary"]: rejected}
+            state.runtime_state = {**state.runtime_state,
+                                   "v12_wa": {**stored, "decision": rejected, "history": history}}
+            return halt(db, account, state, reason)
     if submit and datetime.now(timezone.utc) >= expiry + timedelta(minutes=5):
         execution["status"] = "expired"
     else:
@@ -174,6 +192,36 @@ def _calculate(db, account, now, boundary, today, through, recover_only):
     if recover_only:
         db.rollback()
         return {"status": "paused"}
+    settings = controls(runtime)
+    if not settings["enabled"] or settings.get("stop_reason"):
+        db.rollback()
+        return {"status": "paused", "reason": settings.get("stop_reason")}
+    paper = dict(stored.get("paper") or {"cash": settings["capital_usdt"], "quantity": "0"})
+    if ENABLE_SPOT_TESTNET_ORDERS:
+        monitor = _exchange(db, account)
+        if monitor is None:
+            db.rollback()
+            return {"status": "paused"}
+        recovery, open_lists = inspect_recovery(db, account.id, monitor)
+        cash = next((Decimal(row["free"]) for row in monitor.account()["balances"]
+                     if row["asset"] == "USDT"), Decimal(0))
+        reason = ("봇 결정에 없는 열린 주문을 발견했습니다." if open_lists or monitor.open_orders() else
+                  safety_reason(settings, cash, recovery["owned"], monitor.price(),
+                                mismatched=recovery["owned"] != recovery["balance"]))
+        if reason:
+            return halt(db, account, state, reason)
+    elif DRY_RUN and Decimal(paper["quantity"]) > 0:
+        close = db.scalar(text("""SELECT close FROM spot_candles_1m
+            WHERE user_id = :user_id AND symbol = 'BTCUSDT' AND open_time < :cutoff
+            ORDER BY open_time DESC LIMIT 1"""), {
+                "user_id": account.user_id, "cutoff": now.replace(second=0, microsecond=0, tzinfo=None),
+            })
+        if close is None:
+            db.rollback()
+            return {"status": "paused", "reason": "평가용 현물 봉이 없습니다."}
+        reason = safety_reason(settings, Decimal(paper["cash"]), Decimal(paper["quantity"]), Decimal(str(close)))
+        if reason:
+            return halt(db, account, state, reason)
     model = stored.get("model")
     first = date.fromisoformat(model["boundary"]) + DAY if model else FIRST_DAY
     if first > through:
@@ -184,7 +232,6 @@ def _calculate(db, account, now, boundary, today, through, recover_only):
         "closed_before": now.replace(second=0, microsecond=0, tzinfo=None),
     }).mappings()
     recent = stored.get("decision")
-    paper = dict(stored.get("paper") or {"cash": str(SIMULATION_CASH), "quantity": "0"})
     exchange = None
     for row in rows:
         day = row["day"]
@@ -205,10 +252,10 @@ def _calculate(db, account, now, boundary, today, through, recover_only):
                 decision["execution"] = {"status": "deferred"}
             elif ENABLE_SPOT_TESTNET_ORDERS:
                 exchange = _exchange(db, account)
-                decision["execution"] = (_testnet_plan(db, account, exchange, decision, runtime.get("spot", {}))
+                decision["execution"] = (_testnet_plan(db, account, exchange, decision, runtime.get("spot", {}), settings)
                                          if exchange else {"status": "blocked"})
             elif DRY_RUN:
-                decision["execution"] = paper_intent(paper, decision, row["open"])
+                decision["execution"] = paper_intent(paper, decision, row["open"], Decimal(settings["max_order_usdt"]))
             else:
                 decision["execution"] = {"status": "blocked"}
         history[day.isoformat()] = decision
@@ -218,6 +265,8 @@ def _calculate(db, account, now, boundary, today, through, recover_only):
             state = BotSignalState(trading_account_id=account.id)
             db.add(state)
         state.runtime_state = runtime
+    if exchange is not None and recent["execution"]["status"] == "stop":
+        return halt(db, account, state, recent["execution"]["reason"])
     db.commit()
     if exchange is not None and recent["execution"]["status"] == "pending":
         return _finish_testnet(db, account, state, exchange, submit=True)
@@ -240,4 +289,5 @@ def strategy_status(db, account_id, now):
             "target": decision["target"] if decision else None,
             "calculated_at": decision["calculated_at"] if decision else None,
             "changed_at": decision["changed_at"] if decision else None,
-            "next_calculation_at": scheduled, "decision": decision}
+            "next_calculation_at": scheduled, "decision": decision,
+            "fixed_parameters": asdict(DEFAULT_PARAMETERS)}
